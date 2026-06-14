@@ -1,0 +1,51 @@
+# ============================================================================
+# smart_talkflow 本地开发环境编排
+# ----------------------------------------------------------------------------
+# 当前职责:启动 MySQL 8,并在容器「首次启动」时自动执行
+#          db/smart_talkflow_init.sql,完成 smart_talkflow 库与 5 张平台表建表。
+#
+# 用法:
+#   首次启动:    docker compose up -d
+#   跟随日志:    docker compose logs -f mysql
+#   进入客户端:  docker compose exec mysql mysql -uroot -p
+#   停止(留数据):docker compose down
+#   推倒重来:    docker compose down -v      # 删除数据卷,下次 up 重新执行 initdb
+#
+# 重要:
+#   - MySQL 官方镜像仅在「数据卷为空」时执行 /docker-entrypoint-initdb.d/ 下的脚本。
+#     若修改了 SQL 需要重建表,必须先 docker compose down -v 清掉数据卷,再 up。
+#   - 连接参数(端口 / 密码 / 账号)见 .env,从 .env.example 复制;未设置时用下方默认值。
+# ============================================================================
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: smart_talkflow-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-smart_talkflow}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-root}
+      MYSQL_USER: ${MYSQL_USER:-root}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-root}
+      TZ: ${TZ:-Asia/Shanghai}
+    # 与 smart_talkflow_init.sql 中建库/建表指定的字符序对齐,避免 JOIN 时
+    # 出现 "Illegal mix of collations" (错误码 1267)。
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+    ports:
+      - "${MYSQL_PORT:-3306}:3306"
+    volumes:
+      - mysql-data:/var/lib/mysql
+      # 只读挂载 db/ 目录:容器首次启动时按文件名字母序自动执行其中的 .sql 脚本。
+      # 注意:未来若在该目录放入多个脚本,执行顺序由文件名决定,建议加 01_/02_ 前缀。
+      - ./db:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-p${MYSQL_ROOT_PASSWORD:-root}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      # MySQL 8 首次启动需初始化数据目录 + 执行建表脚本,预留充足探测等待。
+      start_period: 60s
+
+volumes:
+  mysql-data:

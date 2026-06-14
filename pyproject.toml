@@ -3,4 +3,14 @@ name = "smart-talkflow"
 version = "0.1.0"
 description = "Add your description here"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "python-dotenv>=1.2.2",
+    "pydantic-settings>=2.5",
+    "path",
+    "sqlalchemy>=2.0",
+    "asyncmy>=0.2.9",
+    "greenlet>=3.5.1",
+    "httpx[socks]>=0.28.1",
+    "openai>=2.41.1",
+    "anthropic>=0.109.1",
+]
