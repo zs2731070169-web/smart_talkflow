@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from pydantic import field_validator
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # 项目根目录
@@ -68,16 +68,32 @@ class Settings(BaseSettings):
 
     llm_temperature: float = 0.3
 
+    # ---- 提示词仓库(可选,用于从远程 git 仓库拉取系统提示词)----
+    is_git_repo: bool = False
+
+    git_repo_url: str | None = None
+
+    git_branch: str | None = None
+
+    git_relative_path: str | None = None
+
     # ---- 非空校验 ----
-    @field_validator("mysql_host", "mysql_database", "mysql_user", "mysql_password", "tz",
-                     "llm_provider", "llm_api_key", "llm_model", "llm_base_url")
-    @classmethod
-    def _required_non_blank(cls, value: str | None, info) -> str | None:
-        if value is None or not value.strip():
-            # 根据字段名前缀判断配置类型
-            category = "数据库" if info.field_name.startswith("mysql_") else "大模型"
-            raise ValueError(f"{category}配置不能为空")
-        return value.strip()
+    @model_validator(mode="after")
+    def _required_non_blank(self) -> Settings:
+        if not (
+                self.llm_model and self.llm_provider and self.llm_base_url and self.llm_api_key and self.llm_timeout and self.llm_temperature):
+            raise ValueError("llm 配置不能为空")
+        if not (
+                self.mysql_host and self.mysql_database and self.mysql_user and self.mysql_password and self.sql_log and self.tz):
+            raise ValueError("mysql 配置不能为空")
+        return self
+
+    @model_validator(mode="after")
+    def _check_git_config(self) -> Settings:
+        """启用远程仓库拉取时仓库地址必填;分支与相对路径保持可选。"""
+        if self.is_git_repo and not (self.git_repo_url and self.git_repo_url.strip()):
+            raise ValueError("启用提示词仓库(is_git_repo=True)时必须配置 GIT_REPO_URL")
+        return self
 
     @property
     def mysql_conf(self) -> str:
@@ -90,7 +106,3 @@ class Settings(BaseSettings):
 
 # 模块级单例:导入本模块即完成校验,必填项缺失会在此时抛出,做到「启动即失败」。
 settings = Settings()
-
-if __name__ == '__main__':
-    for k, v in settings.__dict__.items():
-        print(k, v)

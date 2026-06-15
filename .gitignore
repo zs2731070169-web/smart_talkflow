@@ -40,3 +40,4 @@ Thumbs.db
 *.log
 logs/
 /uv.lock
+/.prompt/

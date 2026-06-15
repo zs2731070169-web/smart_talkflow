@@ -13,11 +13,9 @@
 """
 from __future__ import annotations
 
-import asyncio
 from contextlib import asynccontextmanager
 from typing import AsyncIterator
 
-from sqlalchemy import text
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -69,12 +67,3 @@ async def db_session() -> AsyncIterator[AsyncSession]:
 async def dispose_engine() -> None:
     """关闭引擎、释放连接池(应用停机时调用一次)。"""
     await async_engine.dispose()
-
-if __name__ == '__main__':
-    async def main() -> None:
-        async with db_session() as session:
-            sql = "select 1"
-            result = await session.execute(text(sql))
-            value = result.scalar()  # 获取标量值 1
-            print(value)
-    asyncio.run(main())

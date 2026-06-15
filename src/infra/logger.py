@@ -18,7 +18,7 @@ from logging import Logger
 from logging.handlers import TimedRotatingFileHandler
 
 from conf.config import ROOT_PATH
-from utils.trace_id_util import get_trace_id, new_trace_id
+from utils.trace_id_util import get_trace_id
 
 # trace_id 缺省时日志里显示的占位符
 _TRACE_ID_PLACEHOLDER = ""
@@ -40,7 +40,7 @@ class TraceIdFilter(logging.Filter):
 
 class LoggerFormatter(logging.Formatter):
     """日志样式配置"""
-    grey = "\x1b[38;20m"  # 灰色
+    grey = "\x1b[90;20m"  # 灰色(亮黑)
     green = "\x1b[32;20m"  # 绿色
     yellow = "\x1b[33;20m"  # 黄色
     red = "\x1b[31;20m"  # 红色
@@ -103,14 +103,3 @@ def _file_logging(logger: Logger, name: str, level: int | str, backup: int) -> N
     file_handler.addFilter(TraceIdFilter())
     file_handler.setFormatter(logging.Formatter(LOG_FORMAT))
     logger.addHandler(file_handler)
-
-
-if __name__ == '__main__':
-    # 模块导入即完成配置,业务代码无需显式调用
-    new_trace_id()
-    logger = setup_logging(__name__)
-    logger.debug("这是一个debug日志")
-    logger.info("这是一个info日志")
-    logger.warning("这是一个warning日志")
-    logger.error("这是一个error日志")
-    logger.critical("这是一个critical日志")

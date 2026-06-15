@@ -18,8 +18,7 @@ from engine.prompts.envirement import EnvironmentInfo
 logger = logging.getLogger(__name__)
 
 # 远程提示词仓库的本地缓存目录
-_PROMPT_REPO_DIR = ROOT_PATH / ".prompt_cache"
-
+_PROMPT_REPO_DIR = ROOT_PATH / ".prompt"
 
 _BASE_SYSTEM_PROMPT = """
 # 角色
@@ -98,14 +97,6 @@ def get_base_system_prompt() -> str:
     return _BASE_SYSTEM_PROMPT
 
 
-def _repo_dir_name(repo_url: str) -> str:
-    """从仓库 URL 推导本地缓存目录名。"""
-    name = repo_url.rstrip("/").split("/")[-1]
-    if name.endswith(".git"):
-        name = name[:-4]
-    return name or "prompt_repo"
-
-
 async def _run_git(*args: str, cwd: Path) -> None:
     """执行一次 git 命令,失败抛 RuntimeError。"""
     proc = await asyncio.create_subprocess_exec(
@@ -122,32 +113,46 @@ async def _run_git(*args: str, cwd: Path) -> None:
         )
 
 
-async def _fetch_remote_prompt(repo_url: str, prompt_path: str) -> str | None:
+async def _fetch_remote_prompt(
+        repo_url: str, prompt_path: str, branch: str | None = None
+) -> str | None:
     """从远程 git 仓库拉取系统提示词文件。
 
-    采用 clone-or-pull:本地缓存不存在则浅克隆,已存在则拉取更新。
+    采用 clone-or-reset:本地缓存不存在则浅克隆,已存在则用远程版本强制覆盖本地(直接覆盖,不合并)。
+    ``branch`` 指定要拉取的分支,为空时使用仓库默认分支。
     任何 git 或读取失败都返回 None,交由上层降级到自定义/默认提示词。
     """
-    repo_dir = _PROMPT_REPO_DIR / _repo_dir_name(repo_url)
     try:
-        if repo_dir.exists():
-            await _run_git("pull", "--ff-only", cwd=repo_dir)
+        if _PROMPT_REPO_DIR.exists():
+            # 本地已存在:直接用远程版本强制覆盖本地,;提示词仓库始终以远程为准
+            if branch:
+                await _run_git("fetch", "origin", branch, cwd=_PROMPT_REPO_DIR)
+                await _run_git("checkout", branch, cwd=_PROMPT_REPO_DIR)
+                await _run_git("reset", "--hard", f"origin/{branch}", cwd=_PROMPT_REPO_DIR)
+            else:
+                await _run_git("fetch", "origin", cwd=_PROMPT_REPO_DIR)
+                await _run_git("reset", "--hard", "@{u}", cwd=_PROMPT_REPO_DIR)  # 对齐当前分支的上游
         else:
             _PROMPT_REPO_DIR.mkdir(parents=True, exist_ok=True)
-            await _run_git(
+            clone_args: list[str] = [
                 "clone",
-                "--depth", # 浅克隆
-                "1", # 浅克隆,只拉最近 1 次提交,省时省流量(提示词仓库只需要最新文件,不需要完整历史)
+                "--depth",  # 浅克隆
+                "1",  # 浅克隆,只拉最近 1 次提交,省时省流量(提示词仓库只需要最新文件,不需要完整历史)
                 repo_url,
-                str(repo_dir), # 本地目标目录(克隆到哪),是 _PROMPT_REPO_DIR 下的子目录
-                cwd=_PROMPT_REPO_DIR # 工作目录设为_PROMPT_REPO_DIR,这样 git 才能在其中创建 repo_dir 这个新目录
+                str(_PROMPT_REPO_DIR),  # 本地目标目录(克隆到哪),是 _PROMPT_REPO_DIR 下的子目录
+            ]
+            if branch:
+                clone_args += ["--branch", branch]  # 克隆指定分支
+            await _run_git(
+                *clone_args,
+                cwd=_PROMPT_REPO_DIR  # 工作目录设为_PROMPT_REPO_DIR,这样 git 才能在其中创建 repo_dir 这个新目录
             )
     except (RuntimeError, OSError) as e:
         logger.warning("拉取远程提示词仓库失败,降级使用本地提示词:%s", e)
         return None
 
     # 从拉取下来的提示词目录当中读取制定路径下的提示词内容
-    target = repo_dir / prompt_path
+    target = _PROMPT_REPO_DIR / prompt_path
     if not target.is_file():
         logger.warning("远程仓库中未找到提示词文件:%s", target)
         return None
@@ -155,9 +160,9 @@ async def _fetch_remote_prompt(repo_url: str, prompt_path: str) -> str | None:
 
 
 async def build_system_prompt(
-    env: EnvironmentInfo,
-    *,
-    custom_prompt: str | None = None,
+        env: EnvironmentInfo,
+        *,
+        custom_prompt: str | None = None,
 ) -> str:
     """构建主控 LLM 的系统提示词。
 
@@ -178,7 +183,8 @@ async def build_system_prompt(
     if env.is_git_repo and env.git_repo_url:
         prompt = await _fetch_remote_prompt(
             env.git_repo_url,
-            env.git_relative_path or "system_prompt.md" # 远程仓库内提示词文件的相对路径
+            env.git_relative_path or "system_prompt.md",  # 远程仓库内提示词文件的相对路径
+            env.git_branch,  # 指定拉取的分支,为空时使用仓库默认分支
         )
 
     # 2. 降级到自定义提示词

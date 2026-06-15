@@ -1,3 +1,5 @@
+
+
 > **目标**：让成熟的传统 OA/ERP/CRM 系统具备自然语言驱动能力，从"同步单点"逐步演进为"长程可靠执行"的 Agent 化平台。
 >
 > **核心原则**：先跑通，再解耦；先同步，再异步；先人工，再自动。
@@ -10,7 +12,7 @@
 
 - [1：最小可行产品（MVP）——同步单流程硬跑通](https://www.notion.so/Agent-37c0bfc33f8380ebb8c6c8bedf175b0e?pvs=21)
 - [2：配置化与解耦——YAML 驱动 + 适配层独立](https://www.notion.so/Agent-37c0bfc33f8380ebb8c6c8bedf175b0e?pvs=21)
-- [3：MCP 标准化——适配层 MCP Server 化](https://www.notion.so/Agent-37c0bfc33f8380ebb8c6c8bedf175b0e?pvs=21)
+- [3：工具标准化——适配层 REST 工具化 + 注册中心](https://www.notion.so/Agent-37c0bfc33f8380ebb8c6c8bedf175b0e?pvs=21)
 - [4：长程任务可靠性——异步、事件驱动与 Saga 补偿](https://www.notion.so/Agent-37c0bfc33f8380ebb8c6c8bedf175b0e?pvs=21)
 - [全局支撑体系（监控、安全、团队）](https://www.notion.so/Agent-37c0bfc33f8380ebb8c6c8bedf175b0e?pvs=21)
 
@@ -134,10 +136,12 @@ smart_talkflow/
 │   ├── prompts.py           # 意图识别 Prompt 管理（含可用流程描述与 few-shot）
 │   └── models.py            # AgentIntent、LLMMessage 等 Pydantic 模型
 ├── orchestrator/
+|   ├── actions/
+|   |   ├── __init__.py
+|   |   └── onboarding.py    # 硬编码入职流程（建档→开户→邮箱）
 │   ├── __init__.py
 │   ├── dispatcher.py        # intent → 对应编排器的路由分发
-│   ├── resolver.py          # 数据补全和反问
-│   └── onboarding.py        # 硬编码入职流程（建档→开户→邮箱）
+│   └── resolver.py          # 数据补全和反问
 ├── adapters/
 │   ├── __init__.py
 │   ├── base.py              # 适配器基类：共享 httpx.AsyncClient、超时、错误码归一等
@@ -272,8 +276,8 @@ oa_agent/
 │   ├── models.py                    # MySQLSQL 数据模型
 │   ├── context.py                   # ⭐ 上下文解析器
 │   └── workflow_engine.py           # ⭐ 通用 WorkflowEngine
-├── adapters/
-│   ├── registry.py                  # ⭐ AdapterRegistry 服务发现                        # ⭐ 变为独立服务目录
+├── adapters/                        # ⭐ 变为独立服务目录
+│   ├── registry.py                  # ⭐ AdapterRegistry 服务发现                        
 │   ├── oa_adapter/
 │   │   ├── main.py                  # FastAPI 独立服务
 │   │   ├── client.py                # OA 系统原始 HTTP 封装
@@ -306,48 +310,49 @@ oa_agent/
 - **调试链路变长**：问题可能在编排层、YAML 配置、适配层、传统系统四层中的任意一层。必须引入分布式 Trace ID，贯穿全链路日志。
 - **并行步骤的聚合**：YAML 声明  parallel_next: true  后，引擎需要等待所有并行分支完成才能执行下一步。需要设计Join 节点或隐式聚合逻辑。
 
-## MCP 标准化——适配层 MCP Server 化
+## 工具标准化——适配层 REST 工具化 + 注册中心
 
-**目标**：适配层从"私有 HTTP 接口"升级为"标准化 MCP Server"，可通过统一协议调用。
+**目标**：适配层从"私有 HTTP 接口"升级为"标准化 REST 工具服务"，编排层通过**工具注册中心**统一发现与调用；LLM 只输出意图与参数，零感知底层工具。
 
 ### 架构图
 
 ```mermaid
 graph TD
     A[用户/Chat] -->|自然语言| B[Agent+编排层<br/>FastAPI]
-    B -->|LLM| C[意图识别]
-    B -->|内存加载| D[YAML流程定义中心<br/>processes/*.yaml]
-    B -->|执行| E[通用WorkflowEngine]
-    E -->|调用步骤| F[MCP Client]
-    F -->|MCP 协议| G[OA适配服务<br/>MCP Server]
-    F -->|MCP 协议| H[email适配服务<br/>MCP Server]
-    G -->|HTTP/RPA| J[AD域控]
-    H -->|HTTP/RPA| K[邮箱系统]
-    
-    style F fill:#f9f,stroke:#333,stroke-width:2px
+    B -->|意图识别| C[LLM]
+    B -->|YAML流程定义| D[通用WorkflowEngine]
+    B -->|启动时扫描/缓存| R[工具注册中心<br/>ToolRegistry]
+    R -->|GET /tools| F[oa-adapter:8001]
+    R -->|GET /tools| G[email-adapter:8002]
+    D -->|POST /invoke| F
+    D -->|POST /invoke| G
+    F -->|HTTP/RPA| J[OA域控]
+    G -->|HTTP/RPA| K[邮箱系统]
+
+    style R fill:#f9f,stroke:#333,stroke-width:2px
+    style F fill:#bbf,stroke:#333,stroke-width:2px
     style G fill:#bbf,stroke:#333,stroke-width:2px
-    style H fill:#bbf,stroke:#333,stroke-width:2px
 ```
 
-**说明**：编排层作为 MCP Client，通过 stdio 或 sse 连接适配层 MCP Server。适配层本身也是独立进程，可被第三方 MCP Host 直接调用。
+**说明**：适配层保持独立 REST 服务，但每个适配层暴露两个标准端点——`GET /tools`与 `POST /invoke`（统一调用入口）。编排层启动时通过 `ToolRegistry` 扫描各适配层、缓存工具目录，运行时由 `WorkflowEngine` 按 YAML 中的 `adapter` + `tool` 定位并经 HTTP 调用。
 
 ### **技术选型**
 
-| 层级     | 技术                      | 理由                                               |
-| -------- | ------------------------- | -------------------------------------------------- |
-| MCP 框架 | FastMCP (官方 Python SDK) | 极简封装，@mcp.tool() 装饰器即可暴露能力           |
-| 传输协议 | stdio（本阶段主推）       | 本地子进程，安全，适合服务器部署；sse 用于远程调试 |
-| 进程管理 | supervisord / systemd     | 管理多个 MCP Server 子进程生命周期                 |
-| 服务发现 | 静态配置（yaml）          | 编排层配置 adapter_key -> 启动命令                 |
+| 层级       | 技术                      | 理由                                                |
+| ---------- | ------------------------- | --------------------------------------------------- |
+| 适配层框架 | FastAPI                   | 延续阶段2，标准 REST，团队熟悉、curl 可调试         |
+| 工具元数据 | JSON Schema               | 统一参数命名/类型/描述规范                          |
+| 工具发现   | GET /tools + 启动扫描缓存 | 编排层启动时拉取并缓存工具目录，支持定时/手动热刷新 |
+| 统一调用   | POST /invoke              | 引擎按 adapter+tool 路由，参数透传，错误码归一      |
 
 ### 模块功能设计
 
-| 模块              | 职责                             | 关键设计                                                     |
-| ----------------- | -------------------------------- | ------------------------------------------------------------ |
-| MCP Server 基座   | 每个适配层暴露标准 Tool          | 统一错误码、统一参数命名、统一                               |
-| MCP Client 连接池 | 编排层管理多个子进程连接         | AdapterClientPool：维护 adapter_key -> ClientSession 映射    |
-| 工具自描述        | 适配层通过 list_tools() 暴露能力 | 编排层启动时扫描，用于 Agent 的 Function Calling 元数据      |
-| 双向通信          | 支持适配层主动推送进度           | stdio 是单向请求-响应；如需推送，适配层应通过 HTTP 回调编排层 |
+| 模块           | 职责                                          | 关键设计                                                                                                                        |
+| -------------- | --------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| 适配层标准端点 | 每个适配层暴露 `GET /tools` + `POST /invoke`  | `GET /tools` 返回 `{name,description,input_schema,output_schema}`；`POST /invoke` 按 tool_name 路由到 handler，参数透传          |
+| 工具注册中心   | 编排层启动扫描适配层、缓存工具目录            | `ToolRegistry`：维护 adapter_key → endpoint + 工具清单，定时刷新，`GET /health` 探活标记可用                                     |
+| 工具元数据校验 | 加载时校验工具 Schema 与 YAML 引用一致性      | YAML 中 `adapter` + `tool` 必须能在注册中心命中，缺失或参数不匹配在加载期即报错                                                  |
+| 进度/推送      | 适配层长耗时操作的进度反馈                    | REST 天然支持异步回调：适配层完成或推进时 `POST /api/v1/events` 回调编排层（与阶段4衔接）                                        |
 
 ### **数据流时序图**
 
@@ -355,25 +360,26 @@ graph TD
 sequenceDiagram
     autonumber
     participant Engine as WorkflowEngine
-    participant Pool as MCP Client Pool
-    participant MCP as oa-adapter<br/>(MCP Server)
-    participant OA as OA域控
+    participant Reg as ToolRegistry<br/>(注册中心)
+    participant OA as oa-adapter<br/>(REST)
+    participant SYS as OA域控
 
     Note over Engine: 编排层启动阶段
-    Engine->>Pool: 初始化连接 oa-adapter
-    Pool->>MCP: 启动子进程 (python -m adapters.ad)
-    MCP-->>Pool: MCP Initialize + 协议握手
-    Pool->>MCP: list_tools()
-    MCP-->>Pool: [{name:"create_account", description:"...", schema:{...}}]
-    Pool-->>Engine: 连接就绪，工具清单已缓存
+    Engine->>Reg: 注册 oa-adapter endpoint
+    Reg->>OA: GET /health
+    OA-->>Reg: 200 OK
+    Reg->>OA: GET /tools
+    OA-->>Reg: [{name:"create_account", input_schema:{...}}]
+    Reg-->>Engine: 工具目录已缓存，加载期校验 YAML 引用一致性
 
     Note over Engine: 用户请求阶段
-    Engine->>Pool: call_tool("ad-adapter", "create_account", {emp_id, name})
-    Pool->>MCP: JSON-RPC call_tool
-    MCP->>OA: HTTP POST 创建账号
-    OA-->>MCP: {account: "zhangsan"}
-    MCP-->>Pool: ToolResult(content=[...])
-    Pool-->>Engine: 解析结果，写入上下文
+    Engine->>Reg: lookup(adapter="oa-adapter", tool="create_account")
+    Reg-->>Engine: endpoint=http://oa-adapter:8001
+    Engine->>OA: POST /invoke {tool:"create_account", params:{emp_id, name}}
+    OA->>SYS: HTTP POST 创建账号
+    SYS-->>OA: {account: "zhangsan"}
+    OA-->>Engine: {ok:true, result:{account:"zhangsan"}}
+    Engine->>Engine: 解析结果，写入上下文
 ```
 
 ### 工程代码模块划分
@@ -396,16 +402,18 @@ oa_agent/
 │   ├── loader.py                    # YAML 热加载器 (watchdog)
 │   ├── models.py                    # MySQLSQL 数据模型
 │   ├── context.py                   # 上下文解析器
-│   └── mcp_client.py                # ⭐ 新增：MCP Client 连接池
-├── adapters/                        # ⭐ 每个适配层变为 MCP Server
+│   └── tool_registry.py             # ⭐ 新增：ToolRegistry 工具发现与缓存
+├── adapters/                        # ⭐ 每个适配层暴露 GET /tools + POST /invoke
 │   ├── hr_adapter/
-│   │   ├── mcp_server.py            # FastMCP 入口
+│   │   ├── main.py                  # FastAPI 入口（/tools、/invoke 路由）
+│   │   ├── tools.py                 # 工具元数据声明（JSON Schema）
 │   │   ├── hr_client.py             # 原始 HR 系统调用
 │   │   └── pyproject.toml
 │   ├── ad_adapter/
-│   │   ├── mcp_server.py
+│   │   ├── main.py
+│   │   ├── tools.py
 │   │   └── ad_client.py
-│   └── shared/                      # 适配层公共库（日志、错误码）
+│   └── shared/                      # 适配层公共库（日志、错误码、统一响应）
 │       └── schemas.py
 ├── core/
 │   ├── models.py
@@ -418,16 +426,16 @@ oa_agent/
 
 ### 埋坑点
 
-1. **MCP Server 进程生命周期**：stdio 模式下，如果编排层重启，子进程会变成孤儿进程或僵尸进程。必须在  AdapterClientPool  里用  atexit  注册清理，或用进程组管 。
-2. **Tool 描述决定 LLM 理解质量**： @mcp.tool()  的功能描述和参数类型注释必须写得极其清晰，否则 LLM 传错参数。建议每个 Tool 都配  examples 。
-3. **错误信息传递链**：MCP Server 内部捕获的异常，必须包装成 MCP 标准的  ToolResult(isError=True) ，而不是直接抛异常导致连接断开。
-4. **stdio 的并发限制**：stdio 传输是单通道，如果编排层同时发起 10 个 Tool Call，可能串行阻塞。高并发场景需切 SSE 或每个请求独立启动进程（但开销大）。
+1. **工具目录一致性**：适配层新增/重命名工具后，编排层缓存的工具目录可能滞后。`ToolRegistry` 需支持定时刷新与 `/refresh` 手动触发；`GET /tools` 响应应带版本号，便于编排层判断是否需要重新拉取。
+2. **适配层健康检查**：适配层独立部署后可能出现"编排层已启动但适配层未就绪"。`ToolRegistry` 初始化时必须 `GET /health` 探活，不可用的适配层标记为 `disabled`，调用时直接返回明确错误而非超时。
+3. **Tool Schema 决定健壮性**：`input_schema` 的字段描述、类型、枚举必须写得清晰，编排层据此对 YAML 透传的参数做预校验，避免脏参数打到下游。建议每个工具配 `examples`。
+4. **错误信息归一**：适配层内部异常必须包装为统一的 `{ok:false, error:{code, message}}` 响应，而不是直接 500，否则编排层无从判断是业务错误还是网络错误。
 
 ### 挑战点
 
-- **调试复杂度陡增**：问题可能出在 MCP 协议层、JSON-RPC 层、适配层业务逻辑层、传统系统层。需要 MCP Inspector（官方工具）做协议抓包。
-- **版本兼容性**：MCP 协议还在快速迭代。SDK 升级可能导致 Breaking Change，需要锁定版本。
-- **第三方接入的安全边界**：如果允许直接连  oa-adapter ，等于给外部工具直接操作 OA 域控的能力。必须加独立的权限网关或只允许编排层白名单 IP 连接。
+- **调试链路可控**：使用 REST 可直接用 curl/Postman 验证 `GET /tools` 与 `POST /invoke`，链路只有"编排层 → 适配层 → 传统系统"三层，Trace ID 全链路打通即可。
+- **Schema 演进与向后兼容**：工具的 `input_schema` 变更（删字段、改类型）会破坏已上线的 YAML。建议 Schema 走版本号，破坏性变更通过新增工具或新增字段完成，而非原地修改。
+- **第三方接入的安全边界**：适配层是标准 REST，更易被外部工具直连。`/invoke` 端点必须加鉴权网关，高危工具（如 `delete_account`）仅编排层白名单 IP 可调，或干脆不对外暴露。
 
 ## 长程任务可靠性——异步、事件驱动与事物补偿
 
@@ -436,68 +444,27 @@ oa_agent/
 ### 架构图
 
 ```mermaid
-graph TB
-    subgraph 交互层
-        A1[Web/Chat Agent]
-        A2[审批Portal]
-        A3[运维告警]
-    end
-    
-    subgraph 编排层
-        B1[Agent+FastAPI<br/>主进程]
-        B2[Sync执行器]
-        B3[Async调度器]
-        B4[事件接收器<br/>/api/v1/events]
-    end
-    
-    subgraph 执行层
-        C1[Celery/ARQ Worker]
-        C2[超时扫描器<br/>APScheduler]
-        C3[事件路由器<br/>Redis/RabbitMQ]
-    end
-    
-    subgraph 适配层
-        D1[hr-adapter<br/>MCP Server]
-        D2[ad-adapter<br/>MCP Server<br/>+ Async Worker]
-        D3[email-adapter<br/>MCP Server]
-    end
-    
-    subgraph 资源层
-        E1[OA域控]
-        E2[CRM域控]
-        E3[邮箱系统]
-    end
-    
-    subgraph 基础设施
-        F1[(MySQL<br/>状态持久化)]
-        F2[(Redis<br/>消息队列/幂等)]
-        F3[(对象存储<br/>审计日志)]
-    end
-    
-    A1 --> B1
-    A2 --> B4
-    B1 --> B2
-    B1 --> B3
-    B2 -->|同步MCP| D1
-    B3 -->|异步提交| D2
-    B3 -->|写入| F1
-    B3 -->|发布任务| C1
-    C1 -->|后台执行| D2
-    D2 -->|完成后| C3
-    C3 -->|事件分发| B4
-    B4 -->|恢复状态机| F1
-    B4 -->|驱动下一步| B2
-    C2 -->|扫描超时| F1
-    C2 -->|触发告警| A3
-    D1 --> E1
-    D2 --> E2
-    D3 --> E3
-    B1 --> F2
-    B1 --> F3
-    
-    style B4 fill:#f96,stroke:#333,stroke-width:2px
-    style C2 fill:#f96,stroke:#333,stroke-width:2px
-    style C3 fill:#f96,stroke:#333,stroke-width:2px
+graph TD
+    A[Web/Chat Agent] -->|自然语言/审批| B[Agent+编排层<br/>FastAPI主进程]
+    B -->|同步执行| C[Sync执行器]
+    B -->|长程提交| D[Async调度器]
+    B -->|事件回流| E[事件接收器<br/>/api/v1/events]
+    C -->|同步 /invoke| F[适配层<br/>hr/ad/email-adapter<br/>REST + /tools]
+    D -->|异步提交| F
+    D -->|发布任务| G[执行层<br/>Celery Worker + APScheduler]
+    G -->|后台执行| F
+    F -->|HTTP/RPA| H[资源层<br/>OA/CRM/邮箱域控]
+    F -->|完成后回调| I[事件路由器<br/>Redis/RabbitMQ]
+    I -->|事件分发| E
+    E -->|恢复状态机| B
+    G -->|扫描超时| E
+    B -->|状态持久化| J[(MySQL)]
+    B -->|幂等/分布式锁| K[(Redis)]
+    G -->|审计日志| L[(对象存储)]
+
+    style E fill:#f96,stroke:#333,stroke-width:2px
+    style G fill:#f96,stroke:#333,stroke-width:2px
+    style I fill:#f96,stroke:#333,stroke-width:2px
 ```
 
 **说明**：新增"执行层"作为独立平面；编排层内部裂变为 Sync/Async/事件接收器三个子系统；状态机支持  WAITING_EVENT  和  HUMAN_APPROVAL  状态。
@@ -533,7 +500,7 @@ sequenceDiagram
     participant Agent as Agent+编排层
     participant DB as PostgreSQL
     participant Celery as Celery Worker
-    participant AD as ad-adapter<br/>MCP Server
+    participant AD as ad-adapter<br/>REST
     participant AD_Worker as AD后台Worker
     participant Queue as Redis队列
     participant Scanner as 超时扫描器
@@ -543,12 +510,12 @@ sequenceDiagram
     Agent->>DB: 创建实例 status=RUNNING
     
     Note over Agent: Step 1: HR建档（同步，3秒完成）
-    Agent->>Agent: 执行 create_hr（同步MCP）
+    Agent->>Agent: 执行 create_hr（同步 /invoke）
     Agent->>DB: 更新上下文 context.create_hr={emp_id:9527}
     
     Note over Agent: Step 2: AD开户（长程，可能2天）
     Agent->>Agent: 执行 submit_ad_async
-    Agent->>AD: MCP call_tool create_account_async
+    Agent->>AD: POST /invoke create_account_async
     AD-->>Agent: 返回 {task_id: "AD-9527", status: "accepted"}
     Agent->>DB: 更新实例<br/>status=WAITING_EVENT<br/>waiting_for=ad_account_created<br/>external_task_id=AD-9527<br/>timeout_at=48h后
     Agent-->>U: "AD账号已提交IT排期，预计2天完成，我会跟进"
@@ -613,16 +580,18 @@ oa_agent/
 │   ├── loader.py                    # YAML 热加载器 (watchdog)
 │   ├── models.py                    # MySQLSQL 数据模型
 │   ├── context.py                   # 上下文解析器
-│   ├── mcp_client.py                # MCP Client 连接池
+│   ├── tool_registry.py             # ⭐ ToolRegistry 工具发现与缓存
 │   ├── async_scheduler.py           # ⭐ Async 调度器
 │   └── event_receiver.py            # ⭐ 事件接收与恢复逻辑
-├── adapters/                        # 每个适配层变为 MCP Server
+├── adapters/                        # 每个适配层暴露 GET /tools + POST /invoke
 │   ├── hr_adapter/
-│   │   ├── mcp_server.py            # FastMCP 入口
+│   │   ├── main.py                  # FastAPI 入口（/tools、/invoke 路由）
+│   │   ├── tools.py                 # 工具元数据声明（JSON Schema）
 │   │   ├── hr_client.py             # 原始 HR 系统调用
 │   │   └── pyproject.toml
 │   ├── ad_adapter/
-│   │   ├── mcp_server.py
+│   │   ├── main.py
+│   │   ├── tools.py
 │   │   ├── ad_client.py
 │   │   └── async_worker.py          # ⭐ 后台执行 + 完成后发事件
 │   └── shared/                      # 适配层公共库（日志、错误码）
@@ -659,7 +628,7 @@ oa_agent/
 - **长程调试的复杂性**：一个流程跑了 3 天，中间经历了重启、回调、审批，出问题时要像"查案"一样从  event_history  里还原现场。日志必须结构化 + Trace ID 全链路。
 - **人工节点的 UX 设计**：审批人可能不用你的系统，而是在钉钉/企业微信/邮件里收到链接。审批网关必须支持免登/短链/移动端适配。
 - **状态机的复杂度**：从 4 个状态（PENDING/RUNNING/COMPLETED/FAILED）扩展到 8+ 个状态，状态转换矩阵容易出错。建议用状态模式或状态机库（如  python-statemachine ）显式管理，不要写满地的  if-else 。
-- **运维心智负担**：系统包含 FastAPI、Celery Worker、APScheduler、Redis、MySQL、多个 MCP Server 子进程。需要Docker Compose 或 K8s 统一编排，否则本地开发环境都起不来。
+- **运维心智负担**：系统包含 FastAPI、Celery Worker、APScheduler、Redis、MySQL、多个 REST 适配层服务。需要Docker Compose 或 K8s 统一编排，否则本地开发环境都起不来。
 
 ## 全局支撑体系
 
@@ -667,10 +636,10 @@ oa_agent/
 
 | 阶段  | 验收标准（必须全部通过）                                     |
 | ----- | ------------------------------------------------------------ |
-| 阶段1 | 1. 用户说一句"给张三办入职"，30 秒内得到成功回复；2. 数据库能查到完整的实例记录；3. 同一句话重复说，不会重复建账号。 |
-| 阶段2 | 1. 新增一个"离职流程"只需新增 YAML 文件，不改 Python 代码；2. 适配层独立部署，编排层通过配置发现它；3. 热加载生效时间 < 5 秒。 |
-| 阶段3 | 1. 适配层可用 `npx @anthropics/mcp-inspector` 直接调试；2. 编排层通过 MCP 调用适配层，而非私有 HTTP；3. Tool 的 docstring 能让 LLM 正确理解参数。 |
-| 阶段4 | 1. 长程任务（模拟 10 分钟）提交后，用户立即收到"已受理"回复；2. 编排层重启后，流程能从 WAITING 状态正确恢复；3. 超时后自动触发补偿或告警；4. 人工审批拒绝后，已创建的账号被自动撤销。 |
+| 阶段1 | 1. 用户说一句"给张三办入职"，30 秒内得到成功回复；<br />2. 数据库能查到完整的实例记录；<br />3. 同一句话重复说，不会重复建账号。 |
+| 阶段2 | 1. 新增一个"离职流程"只需新增 YAML 文件，不改 Python 代码；<br />2. 适配层独立部署，编排层通过配置发现它；<br />3. 热加载生效时间 < 5 秒。 |
+| 阶段3 | 1. 适配层暴露标准 `GET /tools` 与 `POST /invoke`，可用 curl/Postman 直接调试；<br />2. 编排层通过 `ToolRegistry` 发现并缓存工具目录，按 `adapter`+`tool` 经 HTTP 调用；<br />3. 工具 Schema 完整清晰，编排层加载期即可校验 YAML 引用一致性。 |
+| 阶段4 | 1. 长程任务（模拟 10 分钟）提交后，用户立即收到"已受理"回复；<br />2. 编排层重启后，流程能从 WAITING 状态正确恢复；<br />3. 超时后自动触发补偿或告警；<br />4. 人工审批拒绝后，已创建的账号被自动撤销。 |
 
 ### 监控告警设计
 
@@ -678,7 +647,7 @@ oa_agent/
 | ------------- | ---------------------------------- | ---------------------- |
 | 编排层 API    | 请求延迟 P99                       | 2s 告警                |
 | 流程实例      | 处于 `WAITING` 超过 timeout 的数量 | 0 立即告警             |
-| 适配层 MCP    | 进程存活状态                       | 进程消失立即告警       |
+| 适配层 REST   | 服务存活状态                       | 服务不可达立即告警     |
 | Celery Worker | 任务积压数量                       | 100 告警               |
 | 死信队列      | 未消费消息数                       | 0 告警                 |
 | 补偿执行      | 补偿失败次数                       | 0 立即告警（人工介入） |
@@ -687,7 +656,7 @@ oa_agent/
 
 1. **Agent 层**：LLM 提取的参数必须经过 Pydantic Schema 校验，拒绝任何越界参数（如  dept="管理员"  但 Schema 里无此枚举值）。
 2. **编排层**：操作前校验  created_by  的 RBAC 权限（如只有  hr_admin  能触发入职。
-3. **适配层**：MCP Server 只暴露最小必要 Tool，高危操作（如  delete_account ）不暴露给外部 MCP Host，仅编排层白名单可调。
+3. **适配层**：REST 适配层只暴露最小必要 Tool，高危操作（如  delete_account ）不在  /invoke  路由中暴露，仅编排层白名单可调。
 4. **审计**：所有  TaskInstance  的  input_params  和  output_result  必须落库，保存 180 天，支持按  operator  和  business_key  追溯。
 
 ### 回滚策略
