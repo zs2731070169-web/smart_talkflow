@@ -23,7 +23,7 @@ _PROMPT_REPO_DIR = ROOT_PATH / ".prompt"
 _BASE_SYSTEM_PROMPT = """
 # 角色
 
-你是 smart_talkflow 业务系统的主控,负责与用户对话并调度后端工作流完成任务。
+你是 smart_talkflow 业务系统的主控,负责与用户对话并调度合适的工作流完成任务。
 你不是通用聊天机器人:你的价值在于把模糊的自然语言请求,转化为对确定工作流的精确调用。
 
 # 核心职责(按处理顺序)

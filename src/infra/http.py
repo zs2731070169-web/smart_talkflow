@@ -38,10 +38,15 @@ _client: httpx.AsyncClient | None = None
 
 
 def _get_client() -> httpx.AsyncClient:
-    """获取(必要时创建)进程级单例 client,全进程复用其连接池。"""
+    """获取(必要时创建)进程级单例 client,全进程复用其连接池。
+
+    ``trust_env=False``:适配器对接的是内网业务系统(OA/ERP/CRM),不能走开发机上的
+    系统代理(如 ``HTTP_PROXY=127.0.0.1:7890`` 的 clash)。否则对 ``127.0.0.1:48080``
+    这类回环/内网地址的调用会被代理截走(表现为代理回 502),链路打不通。
+    """
     global _client
     if _client is None:
-        _client = httpx.AsyncClient(timeout=_DEFAULT_TIMEOUT)
+        _client = httpx.AsyncClient(timeout=_DEFAULT_TIMEOUT, trust_env=False)
     return _client
 
 

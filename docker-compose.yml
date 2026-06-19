@@ -47,5 +47,21 @@ services:
       # MySQL 8 首次启动需初始化数据目录 + 执行建表脚本,预留充足探测等待。
       start_period: 60s
 
+  # Redis:smart_talkflow 的 JWKS 公钥缓存等 KV 场景(见 infra/redis_client)。
+  redis:
+    image: redis:7
+    container_name: smart_talkflow-redis
+    restart: unless-stopped
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
 volumes:
   mysql-data:
+  redis-data:

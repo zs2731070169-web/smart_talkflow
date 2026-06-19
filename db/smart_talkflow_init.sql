@@ -8,7 +8,7 @@
 --     1. 业务实体数据(员工、部门、身份证号、邮箱账号……)一律归各传统业务
 --        系统所有,本平台「调用」而非「复制」,不建立任何业务主数据表。
 --     2. 本平台只持久化「编排 / 执行 / 审计」三类平台数据。
---     3. 凡业务相关的标识(process_key / business_key / adapter / actions)均为
+--     3. 凡业务相关的标识(process_key / business_key / adapter / workflow)均为
 --        泛型字符串,其「具体含义」由运行时的流程定义决定,而非由表结构绑定。
 --     4. 所有数据可能流经 PII(如身份证号会作为 business_key 或参数出现),
 --        生产环境需在应用层做脱敏 / 加密,表结构不针对单一敏感字段。
@@ -109,7 +109,7 @@ CREATE TABLE process (
 --    对应模块:orchestrator/onboarding.py 各 Step + 埋坑点4(预留 # TODO: compensate)
 --    用途:记录流程内每一步(如 建档/开户/授权/邮箱)的输入输出与状态;
 --         为阶段4 Saga 补偿预留 compensation_status;失败时据此人工介入。
---    说明:adapter / actions 均为泛型标识,不绑定具体业务系统或动作。
+--    说明:adapter / workflow 均为泛型标识,不绑定具体业务系统或动作。
 -- ----------------------------------------------------------------------------
 DROP TABLE IF EXISTS process_step;
 CREATE TABLE process_step (
@@ -158,6 +158,9 @@ CREATE TABLE adapter_call_logs (
     error_message        TEXT         NULL COMMENT '错误信息(超时 / 业务错误码等)',
     duration_ms          INT UNSIGNED NULL COMMENT '调用耗时(毫秒,埋坑点3:严格 10s 超时的监控依据)',
     trace_id             VARCHAR(64)  NULL COMMENT '全链路追踪ID',
+    operator_id          VARCHAR(64)  NULL COMMENT '真实操作人(代签自 X-Operator-Userid)',
+    tenant_id            VARCHAR(64)  NULL COMMENT '所属租户(代签自 operator.tenant_id)',
+    credential_source    VARCHAR(64)  NULL COMMENT '凭证来源(如 service_account_delegated)',
     created_at           DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
     PRIMARY KEY (id),
     KEY idx_process (process_id),

@@ -77,22 +77,57 @@ class Settings(BaseSettings):
 
     git_relative_path: str | None = None
 
+    # ---- 下游业务系统 ----
+    # 接入 OA
+    oa_base_url: str
+
+    # api-key
+    oa_api_key: str
+
+    # HMAC 签名密钥
+    oa_delegation_secret: str
+
+    # ---- Redis----
+    redis_url: str = "redis://127.0.0.1:6379/0"
+
+    # ---- 认证模式----
+    auth_dev_mode: bool = True
+
+    # ---- SSO(生产态:auth_dev_mode=False 时走 SSO/JWT)----
+    sso_issuer: str | None = None       # JWT iss 校验
+
+    sso_jwks_uri: str | None = None     # JWKS 公钥端点
+
+    sso_audience: str | None = None     # JWT aud 校验
+
+    sso_jwks_cache_ttl: int = 3600      # JWKS redis 缓存秒数
+
     # ---- 非空校验 ----
     @model_validator(mode="after")
     def _required_non_blank(self) -> Settings:
         if not (
                 self.llm_model and self.llm_provider and self.llm_base_url and self.llm_api_key and self.llm_timeout and self.llm_temperature):
             raise ValueError("llm 配置不能为空")
+
         if not (
                 self.mysql_host and self.mysql_database and self.mysql_user and self.mysql_password and self.sql_log and self.tz):
             raise ValueError("mysql 配置不能为空")
-        return self
 
-    @model_validator(mode="after")
-    def _check_git_config(self) -> Settings:
-        """启用远程仓库拉取时仓库地址必填;分支与相对路径保持可选。"""
+        # 启用远程仓库拉取时仓库地址必填;分支与相对路径保持可选
         if self.is_git_repo and not (self.git_repo_url and self.git_repo_url.strip()):
             raise ValueError("启用提示词仓库(is_git_repo=True)时必须配置 GIT_REPO_URL")
+
+        if not self.oa_base_url:
+            raise ValueError("下游系统配置不能为空:oa_base_url")
+
+        if not (self.oa_api_key and self.oa_delegation_secret):
+            raise ValueError("下游系统认证配置不能为空:oa_api_key / oa_delegation_secret")
+
+        # 生产态(auth_dev_mode=False)走 SSO/JWT:issuer / jwks_uri / redis_url 必填
+        if not self.auth_dev_mode and not (
+            self.sso_issuer and self.sso_jwks_uri and self.redis_url
+        ):
+            raise ValueError("生产态(auth_dev_mode=False)必须配置:sso_issuer / sso_jwks_uri / redis_url")
         return self
 
     @property

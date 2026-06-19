@@ -1,9 +1,16 @@
-from typing import Any
+import json
+from typing import Any, AsyncGenerator
 
 from anthropic import AsyncAnthropic
 from openai import AsyncOpenAI
 
-from engine.client.base_client import ApiMessageRequest, ApiMessageResponse
+from engine.client.base_client import (
+    ApiMessageCompleteEvent,
+    ApiMessageRequest,
+    ApiStreamEvent,
+    ApiTextDeltaEvent,
+)
+from engine.client.messages import ConversationMessage, ToolUseBlock
 
 
 class OpenAIClient:
@@ -16,41 +23,59 @@ class OpenAIClient:
             raise ValueError("OPENAI_API_BASE 未配置")
         self._client = AsyncOpenAI(api_key=api_key, base_url=base_url, timeout=timeout)
 
-    async def ainvoke_message(self, request: ApiMessageRequest) -> ApiMessageResponse:
-        # 组装 messages:可选 system_prompt + 当前会话消息
+    async def stream_message(self, request: ApiMessageRequest) -> AsyncGenerator[ApiStreamEvent, None]:
+        # 组装 messages:system_prompt + 当前会话消息
         messages: list[dict[str, str]] = []
         if request.system_prompt:
             messages.append({"role": "system", "content": request.system_prompt})
-        messages.append({
-            "role": request.message.role,
-            "content": "\n".join(request.message.content),
-        })
+        for msg in request.message:
+            text = "".join(block.text for block in msg.content if block.type == "text")
+            messages.append({"role": msg.role, "content": text})
 
-        # workflows 透传为 OpenAI tools(为空则不传,避免无谓参数)
         kwargs: dict[str, Any] = {
             "model": request.model,
             "messages": messages,
             "max_tokens": request.max_tokens,
+            "stream": True,
         }
-        if request.workflows:
-            kwargs["tools"] = request.workflows
 
-        completion = await self._client.chat.completions.create(**kwargs)
-        choice = completion.choices[0]
-        assistant = choice.message
+        # workflows 透传为 OpenAI tools(为空则不传)
+        if request.tools:
+            kwargs["tools"] = request.tools
 
-        # tool_calls 映射为统一的 workflow_calls,屏蔽底层 sdk 差异
-        workflow_calls = [
-            tool_call.model_dump()
-            for tool_call in (assistant.tool_calls or [])
-        ]
+        # 流式拉取:逐 chunk 吐出文本片段;
+        # tool_calls 为增量协议,按 index 聚合 id / name / arguments
+        tool_calls: dict[int, dict[str, Any]] = {}
+        async with await self._client.chat.completions.create(**kwargs) as stream:
+            async for chunk in stream:
+                if not chunk.choices:
+                    continue
+                delta = chunk.choices[0].delta
 
-        return ApiMessageResponse(
-            content=assistant.content or "",
-            model=completion.model,
-            finish_reason=choice.finish_reason,
-            workflow_calls=workflow_calls,
-            raw=completion,
+                if delta.content:
+                    yield ApiTextDeltaEvent(text=delta.content)
+
+                for piece in delta.tool_calls or []:
+                    slot = tool_calls.setdefault(piece.index, {"id": "", "name": "", "arguments": ""})
+                    if piece.id:
+                        slot["id"] = piece.id
+                    if piece.function:
+                        if piece.function.name:
+                            slot["name"] = piece.function.name
+                        if piece.function.arguments:
+                            slot["arguments"] += piece.function.arguments
+
+        # 聚合结果映射为统一的 TextBlock / ToolUseBlock,屏蔽 sdk 差异
+        blocks: list[Any] = []
+        for slot in tool_calls.values():
+            blocks.append(ToolUseBlock(
+                id=slot["id"],
+                name=slot["name"],
+                input=json.loads(slot["arguments"] or "{}"),
+            ))
+
+        yield ApiMessageCompleteEvent(
+            message=ConversationMessage(role="assistant", content=blocks)
         )
 
 
@@ -62,60 +87,57 @@ class AnthropicApiClient:
             raise ValueError("ANTHROPIC_API_KEY 未配置")
         self._client = AsyncAnthropic(api_key=api_key, base_url=base_url, timeout=timeout)
 
-    async def stream_message(self, request: ApiMessageRequest) -> ApiMessageResponse:
-        # anthropic 的 system 是顶级参数,与 openai 放进 messages 的做法不同
+    @staticmethod
+    def _build_messages(request: ApiMessageRequest) -> tuple[str | None, list[dict[str, Any]]]:
+        """统一对话结构, 三类 content block 映射到 text / tool_use / tool_result。"""
+
+        def build_block(block: Any) -> dict[str, Any]:
+            # 用户消息
+            if block.type == "text":
+                return {"type": "text", "text": block.text}
+            # 请求工具调用
+            if block.type == "tool_use":
+                return {"type": "tool_use", "id": block.id, "name": block.name, "input": block.input}
+            # 工具调用结果
+            return {
+                "type": "tool_result",
+                "tool_use_id": block.tool_use_id,
+                "content": block.content,
+            }
+
+        messages = [
+            {"role": msg.role, "content": [build_block(block) for block in msg.content]}
+            for msg in request.message
+            if msg.content  # 跳过空内容消息
+        ]
+        return request.system_prompt, messages
+
+    async def stream_message(self, request: ApiMessageRequest) -> AsyncGenerator[ApiStreamEvent, None]:
+        # 构建系统提示词和消息列表
+        system_prompt, messages = self._build_messages(request)
         kwargs: dict[str, Any] = {
             "model": request.model,
             "max_tokens": request.max_tokens,
-            "messages": [
-                {"role": request.message.role, "content": "\n".join(request.message.content)},
-            ],
+            "messages": messages,
         }
-        if request.system_prompt:
-            kwargs["system"] = request.system_prompt
-        # workflows 透传为 anthropic tools,需符合 name/description/input_schema 结构
-        if request.workflows:
-            kwargs["tools"] = request.workflows
+        if system_prompt:
+            kwargs["system"] = system_prompt
+        if request.tools:
+            kwargs["tools"] = request.tools
 
-        # 流式拉取后用 get_final_message 聚合完整响应,屏蔽底层事件遍历
+        # 流式拉取:text_stream 逐片段吐出,get_final_message 聚合完整响应(含 tool_use)
         async with self._client.messages.stream(**kwargs) as stream:
-            final = await stream.get_final_message()
+            async for text in stream.text_stream:
+                yield ApiTextDeltaEvent(text=text)
+            final_message = await stream.get_final_message()
 
-        # 拼接 text 块;tool_use 块映射为统一的 workflow_calls,屏蔽 sdk 差异
-        workflow_calls = [
-            block.model_dump() for block in final.content if block.type == "tool_use"
-        ]
-        content = "".join(block.text for block in final.content if block.type == "text")
+        # tool_use 块映射为 ToolUseBlock, 屏蔽 sdk 差异
+        blocks: list[Any] = []
+        for block in final_message.content:
+            if block.type == "tool_use":
+                blocks.append(ToolUseBlock(id=block.id, name=block.name, input=block.input))
 
-        return ApiMessageResponse(
-            content=content,
-            model=final.model,
-            finish_reason=final.stop_reason,
-            workflow_calls=workflow_calls,
-            raw=final,
+        yield ApiMessageCompleteEvent(
+            message=ConversationMessage(role="assistant", content=blocks)
         )
 
-
-if __name__ == '__main__':
-    import asyncio
-
-    from conf.config import settings
-    from engine.messages import ConversationMessage
-
-
-    async def main() -> None:
-        # 最小连通性自测:用 settings 里的 llm 配置发一次普通对话,打印回复
-        client = OpenAIClient(
-            api_key=settings.llm_api_key,
-            base_url=settings.llm_base_url,
-            timeout=settings.llm_timeout,
-        )
-        request = ApiMessageRequest(
-            model=settings.llm_model,
-            message=ConversationMessage(role="user", content=["用一句话介绍你自己"]),
-        )
-        response = await client.ainvoke_message(request)
-        print(f"[{response.model}] {response.content}")
-
-
-    asyncio.run(main())

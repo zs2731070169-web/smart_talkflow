@@ -1,8 +1,18 @@
 [project]
 name = "smart-talkflow"
 version = "0.1.0"
-description = "Add your description here"
+description = "Agent 平台:将自然语言意图翻译为对传统业务系统(OA/ERP/CRM)的确定性工作流调用。"
+readme = "README.md"
+license = { file = "LICENSE" }
 requires-python = ">=3.12"
+authors = [{ name = "Hariku" }]
+keywords = ["agent", "workflow", "llm", "oa", "erp", "crm"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Programming Language :: Python :: 3.12",
+    "Framework :: FastAPI",
+    "Topic :: Software Development :: Libraries :: Application Frameworks",
+]
 dependencies = [
     "python-dotenv>=1.2.2",
     "pydantic-settings>=2.5",
@@ -13,4 +23,12 @@ dependencies = [
     "httpx[socks]>=0.28.1",
     "openai>=2.41.1",
     "anthropic>=0.109.1",
+    "any>=0.0.2",
+    "logger>=1.4",
+    "fastapi>=0.137.2",
+    "pyjwt>=2.13.0",
+    "cryptography>=49.0.0",
+    "redis>=8.0.0",
+    "fakeredis>=2.36.2",
+    "uvicorn[standard]>=0.49.0",
 ]

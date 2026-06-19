@@ -161,6 +161,9 @@ class AdapterCallLog(Base):
     error_message: Mapped[str | None] = mapped_column(Text)
     duration_ms: Mapped[int | None] = mapped_column(Integer)
     trace_id: Mapped[str | None] = mapped_column(String(64))
+    operator_id: Mapped[str | None] = mapped_column(String(64))  # 真实操作人
+    tenant_id: Mapped[str | None] = mapped_column(String(64))  # 所属租户
+    credential_source: Mapped[str | None] = mapped_column(String(64))  # 凭证来源
 
     # process_id / step_execution_id 均可空:部分调用不在流程上下文内(如健康检查)
     process: Mapped["Process | None"] = relationship(
