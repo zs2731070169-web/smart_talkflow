@@ -4,7 +4,8 @@
 
 - :func:`api.deps.resolve_operator`:从 ``X-Operator-*`` 头解析 operator;
   ``roles`` 按逗号拆分;缺 ``X-Operator-Userid`` 返回 ``None``。
-- :meth:`orchestrator.base.BaseWorkflow.is_allowed`:空集放行、命中 / 不命中。
+- :meth:`orchestrator.base.BaseWorkflow.is_allowed`:无配置放行、命中 / 不命中
+  (``is_allowed`` 异步查 ``workflow_role`` 配置 + redis 缓存,这里 mock checker)。
 
 SSO(JWT 验签)路径由 ``tests.test_sso`` 覆盖。
 
@@ -13,6 +14,7 @@ SSO(JWT 验签)路径由 ``tests.test_sso`` 覆盖。
     PYTHONPATH=src python -m unittest tests.test_deps
 """
 import unittest
+from unittest.mock import AsyncMock, patch
 
 from api.deps import resolve_operator
 from orchestrator.base import BaseWorkflow
@@ -51,10 +53,11 @@ class ResolveOperatorTest(unittest.TestCase):
         self.assertIsNone(resolve_operator({"X-Operator-Userid": "   "}))
 
 
-# ---- RBAC:用最小可实例化工作流驱动 is_allowed ----
+# ---- RBAC:用最小可实例化工作流驱动 is_allowed(mock checker)----
 class _Workflow(BaseWorkflow):
     """最小可实例化工作流(仅用于驱动 is_allowed,不执行真实逻辑)。"""
 
+    name = "test_workflow"
     description = ""
     input_model = None  # type: ignore[assignment]
 
@@ -65,35 +68,35 @@ class _Workflow(BaseWorkflow):
         ...
 
 
-class _RoleGatedWorkflow(_Workflow):
-    """声明 allowed_roles 的工作流(模拟入职只放行 hr_admin)。"""
-
-    allowed_roles = {"hr_admin"}
-
-
-class IsAllowedTest(unittest.TestCase):
-    """BaseWorkflow.is_allowed:流程级 RBAC。"""
+class IsAllowedTest(unittest.IsolatedAsyncioTestCase):
+    """BaseWorkflow.is_allowed:层 A 角色准入(查 workflow_role 配置 + 缓存)。"""
 
     def _op(self, roles):
         return OperatorContext(user_id="u", roles=list(roles))
 
-    def test_empty_roles_allows_everyone(self):
-        """未声明 allowed_roles(空集)= 全员可用。"""
-        wf = _Workflow()
-        self.assertTrue(wf.is_allowed(self._op(["employee"])))
-        self.assertTrue(wf.is_allowed(self._op([])))
+    async def test_no_config_allows_everyone(self):
+        """无配置(空集)= 全员可用。"""
+        with patch("orchestrator.base.workflow_role_checker") as mock_checker:
+            mock_checker.get_allowed_roles = AsyncMock(return_value=set())
+            wf = _Workflow()
+            self.assertTrue(await wf.is_allowed(self._op(["employee"])))
+            self.assertTrue(await wf.is_allowed(self._op([])))
 
-    def test_role_match_allows(self):
-        """operator 角色命中 allowed_roles -> 放行。"""
-        wf = _RoleGatedWorkflow()
-        self.assertTrue(wf.is_allowed(self._op(["hr_admin"])))
-        self.assertTrue(wf.is_allowed(self._op(["hr_admin", "employee"])))
+    async def test_role_match_allows(self):
+        """operator 角色命中配置的允许集合 -> 放行。"""
+        with patch("orchestrator.base.workflow_role_checker") as mock_checker:
+            mock_checker.get_allowed_roles = AsyncMock(return_value={"hr_admin"})
+            wf = _Workflow()
+            self.assertTrue(await wf.is_allowed(self._op(["hr_admin"])))
+            self.assertTrue(await wf.is_allowed(self._op(["hr_admin", "employee"])))
 
-    def test_role_mismatch_denies(self):
-        """operator 角色不命中 -> 拒绝。"""
-        wf = _RoleGatedWorkflow()
-        self.assertFalse(wf.is_allowed(self._op(["employee"])))
-        self.assertFalse(wf.is_allowed(self._op([])))
+    async def test_role_mismatch_denies(self):
+        """operator 角色不在允许集合 -> 拒绝。"""
+        with patch("orchestrator.base.workflow_role_checker") as mock_checker:
+            mock_checker.get_allowed_roles = AsyncMock(return_value={"hr_admin"})
+            wf = _Workflow()
+            self.assertFalse(await wf.is_allowed(self._op(["employee"])))
+            self.assertFalse(await wf.is_allowed(self._op([])))
 
 
 if __name__ == "__main__":

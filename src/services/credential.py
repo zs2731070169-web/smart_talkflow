@@ -80,16 +80,14 @@ def _build_agent_headers(
 
     raw = f"{operator.user_id}|{operator.tenant_id}|{nonce}|{timestamp}"
     # 签名加密计算,唯一认证
-    signature = hmac.new(
-        delegation_secret.encode(), raw.encode(), hashlib.sha256
-    ).hexdigest()
+    signature = hmac.new(delegation_secret.encode(), raw.encode(), hashlib.sha256).hexdigest()
 
     headers.update({
         "tenant-id": operator.tenant_id,
         "X-Operator-Userid": operator.user_id,
         "X-Agent-Signature": signature,
         "X-Agent-Timestamp": timestamp,
-        "X-Agent-Nonce": nonce,
+        "X-Agent-Nonce": nonce, # 一次性随机数
     })
     return headers
 

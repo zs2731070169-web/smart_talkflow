@@ -90,6 +90,10 @@ class Settings(BaseSettings):
     # ---- Redis----
     redis_url: str = "redis://127.0.0.1:6379/0"
 
+    # 工作流角色准入(workflow_role)redis 缓存 TTL 秒;
+    # 运维改配置后调 invalidate 立即生效,或等 TTL 过期
+    workflow_role_cache_ttl: int = 300
+
     # ---- 认证模式----
     auth_dev_mode: bool = True
 

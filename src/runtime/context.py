@@ -7,7 +7,6 @@
 
 这是平台「请求级执行上下文」的归宿(见 CLAUDE.md「runtime/」层):api 层构建,
 串联 parse → resolve → 幂等 → orchestrator 全链,承载意图 / 参数 / 幂等键 / 步骤
-中间产物等。本次仅落地 operator(认证代签所需),其余字段随阶段演进补全。
 """
 from __future__ import annotations
 
@@ -28,6 +27,7 @@ class OperatorContext:
     user_id: str  # 真实操作人标识
     roles: list[str] = field(default_factory=list)  # 平台 RBAC 角色(层 A 授权用)
     tenant_id: str = ""  # 所属租户
+    name: str = ""  # 操作人显示名(代签 X-Operator-Name 头,审计用)
 
 
 @dataclass
@@ -40,7 +40,8 @@ class RequestContext:
 
     operator: OperatorContext
     trace_id: str | None = None
-    # 预留:意图 / 参数 / 幂等键 / 步骤中间产物等请求级状态
+    # 流程实例 id(dispatcher 创建 process 后回填,供 adapter 审计留痕关联)
+    process_id: int | None = None
 
 
 # ContextVar:持有当前请求的 RequestContext。
@@ -63,3 +64,16 @@ def get_operator() -> OperatorContext | None:
     """读取当前请求的操作人,可能为 ``None``(未认证或未设置)。"""
     ctx = _request_context.get()
     return ctx.operator if ctx else None
+
+
+def set_process_id(process_id: int | None) -> None:
+    """回填当前请求关联的流程实例 id(dispatcher 创建 process 后调用)。"""
+    ctx = _request_context.get()
+    if ctx is not None:
+        ctx.process_id = process_id
+
+
+def get_process_id() -> int | None:
+    """读取当前请求关联的流程实例 id,可能为 ``None``(非流程上下文内)。"""
+    ctx = _request_context.get()
+    return ctx.process_id if ctx else None

@@ -4,7 +4,7 @@
 
 **让成熟的传统业务系统,具备自然语言驱动的 Agent 能力**
 
-一个面向 OA / ERP / CRM 等传统系统的**通用 Agent 编排平台**——把模糊的自然语言请求,转化为对确定工作流的精确调用,并逐步从「同步单点执行」演进为「长程可靠执行」。
+一个面向 OA / ERP / CRM 等传统系统的**可扩展 Agent 编排骨架**——把模糊的自然语言请求,转化为对确定工作流的精确调用,并逐步从「同步单点执行」演进为「长程可靠执行」。
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![Python 3.12+](https://img.shields.io/badge/Python-3.12%2B-blue.svg)](https://www.python.org/)
@@ -35,7 +35,9 @@
 
 ## 这是什么
 
-`smart_talkflow` 是一个**业务无关的 Agent 编排底座**。它不复制任何业务数据,只负责把"用户的一句话"翻译成一串对已有业务系统的精确调用,并在每一步留下可追溯的执行痕迹。
+`smart_talkflow` 是一个**业务无关、可扩展的 Agent 编排骨架**。它不复制任何业务数据,只负责把"用户的一句话"翻译成一串对已有业务系统的精确调用,并在每一步留下可追溯的执行痕迹。
+
+> **"可扩展"而非"全通用"**:编排 / 审计 / 幂等 / 留痕的底座是业务无关的;但每个下游系统的**认证方式与响应结构各不相同**(OA 用 api-key + 代签,ERP 可能是 OAuth2,老 CRM 可能 session……),这部分由各自的适配器与凭证 provider 定制。当前已落地 **OA(yudao-office)** 接入,加新系统为局部新增(一组配置 + 一个 adapter + 一个凭证 provider),不改底座。
 
 当前 MVP 已落地的示例流程是**会议室预订**:
 
@@ -67,10 +69,10 @@
 
 ## 核心特性
 
-- 🔌 **业务无关的泛型模型**——平台不建任何业务主数据表,`process_key` / `business_key` / `adapter` / `action` 全部是运行时赋值的泛型字符串,同一套底座能编排入职、离职、会议室预订……任意流程。
+- 🔌 **业务无关的泛型模型**——平台不建任何业务主数据表,`process_key` / `business_key` / `adapter` / `action` 全部是运行时赋值的泛型字符串,同一套底座能编排入职、离职、会议室预订……任意流程;凭证 provider 也按 `target_system` 注册,新增下游系统即插即用。
 - 🛡️ **Pydantic 强校验,挡住 LLM 幻觉**——LLM 输出的每一个参数都过 Schema 校验,越界值绝不透传给下游。
 - 🔁 **业务键级幂等 + 状态机**——以 `UNIQUE(process_key, business_key)` 兜底,命中记录按 `running / completed / failed / reject` 分流:已完成的直接短路,失败的按重试计数放行或永久拒绝。
-- 🔐 **两层认证 + 代签**——开发态信任请求头、生产态走 SSO/JWT(JWKS 公钥经 Redis 缓存验签);真实操作人经 HMAC 代签给下游,服务账号只做技术认证,审计与权限始终归属真实用户。
+- 🔐 **两层认证 + 代签**——开发态信任请求头、生产态走 SSO/JWT(JWKS 公钥经 Redis 缓存验签);真实操作人经 HMAC 代签给下游,服务账号只做技术认证,审计与权限始终归属真实用户(代签依赖下游支持,如 yudao 的 `AgentDelegationFilter`;不支持代签的系统审计会降级为服务账号级别)。
 - 🧭 **角色权限网关**——每个工作流声明 `allowed_roles`,编排器在执行前判定操作人是否有权触发,把越权请求挡在编排层。
 - 🧩 **LLM 抽象层,屏蔽厂商差异**——一套 `SupportsInvokeMessages` 协议统一 OpenAI / Anthropic,Function Calling / Tool Use 归一为 `ToolUseBlock`,切换厂商只改环境变量。
 - 📡 **SSE 流式反馈**——意图解析与工具执行的过程实时以 `text / tool_started / tool_completed` 事件推回前端,长流程不阻塞。
@@ -273,6 +275,8 @@ LLM 可能编造不存在的部门名或会议室号。所有 LLM 输出都经 P
 
 对下游业务系统的调用用**服务账号**做技术认证(`X-API-Key`),同时把**真实操作人**经 HMAC 签名「代签」(`X-Operator-Userid` + `X-Agent-Signature`)。下游验签后改写当前用户为真实操作人,使 `@PreAuthorize` 按真实权限判定、审计归属真实用户。
 
+> ⚠️ 代签依赖**下游支持**(如 yudao 的 `AgentDelegationFilter`);若某系统不支持代签,只能用固定服务账号调用,此时审计会降级为服务账号级别、无法穿透到真实操作人。这类系统的凭证 provider 单独实现即可,不影响底座与其他系统。
+
 ### 7. 启动装配一次,每请求轻量执行
 
 进程级组件(`WorkflowRegistry` / `WorkflowDispatcher` / `IntentParser`)在应用 `lifespan` 启动时**装配一次**,存入 `app.state`;每个请求只做轻量执行——构建请求级上下文、跑意图解析、产出 SSE 事件流。SSE 序列化归 runtime,路由层不做请求内装配。
@@ -315,6 +319,8 @@ LLM 可能编造不存在的部门名或会议室号。所有 LLM 输出都经 P
 | `LLM_TEMPERATURE` | 采样温度 | `0.3` |
 
 ### 下游业务系统(OA)
+
+> 凭证按系统扁平配置:每个下游系统一组 `{SYSTEM}_BASE_URL` / `{SYSTEM}_API_KEY` / `{SYSTEM}_DELEGATION_SECRET`(当前为 `OA_*`)。**新增系统时加一组同前缀变量**,并在 `config.py` 的 `CONFIGURED_DOWNSTREAM_SYSTEMS` 清单登记一项、注册对应的凭证 provider 即可,无需改配置结构与底座。
 
 | 变量 | 说明 | 默认 |
 |---|---|---|

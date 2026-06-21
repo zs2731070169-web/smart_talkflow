@@ -4,6 +4,7 @@ from typing import Any
 
 from pydantic import BaseModel
 
+from permission.permission import workflow_role_checker
 from runtime.context import OperatorContext
 
 
@@ -27,18 +28,19 @@ class BaseWorkflow(ABC):
     name: str
     description: str
     input_model: type[BaseModel]
-    # 允许触发本流程的角色; 默认空集表示不限制角色。
-    allowed_roles: set[str] = set()
 
-    def is_allowed(self, operator: OperatorContext) -> bool:
-        """层 A:operator 是否有权触发本流程。
+    async def is_allowed(self, operator: OperatorContext) -> bool:
+        """层 A:operator 是否有权触发本流程(角色准入查 DB + redis 缓存)。
+
+        运维改配置后调 ``workflow_role_checker.invalidate`` 立即生效,
+        或等 ``settings.workflow_role_cache_ttl`` 过期。
 
         :param operator: 当前请求操作人
-        :return: allowed_roles 
         """
-        if not self.allowed_roles:
+        roles = await workflow_role_checker.get_allowed_roles(self.name)
+        if not roles:
             return True
-        return bool(set(operator.roles) & self.allowed_roles)
+        return bool(set(operator.roles) & roles)
 
     @abstractmethod
     def business_key(self, arguments: BaseModel) -> str | None:

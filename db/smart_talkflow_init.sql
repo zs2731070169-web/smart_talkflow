@@ -196,6 +196,21 @@ CREATE TABLE audit_logs (
     KEY idx_created_at (created_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='通用操作审计:按 operator / business_key 追溯,建议保留 180 天';
 
+-- ----------------------------------------------------------------------------
+-- 工作流角色准入(层 A RBAC 配置,运行时可改):每个流程放行哪些角色。
+-- 运维通过增删行调整权限,改后调 invalidate 或等缓存 TTL 过期。
+-- 无记录 = 全员可用(不限制)。
+-- ----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS workflow_role (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    workflow_name VARCHAR(64) NOT NULL COMMENT '工作流名称(对应 workflow.name)',
+    `role` VARCHAR(64) NOT NULL COMMENT '允许触发的角色(平台 RBAC role,来自 SSO)',
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (id),
+    UNIQUE KEY uk_workflow_role (workflow_name, role),
+    KEY idx_workflow (workflow_name)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='层 A RBAC:工作流角色准入(动态配置)';
+
 -- ============================================================================
 -- 结束:本脚本不含业务种子数据(平台业务无关,部门 / 员工等归各业务系统)。
 -- 验证场景(如入职)所需的外部业务数据,请在对应传统业务系统中准备。

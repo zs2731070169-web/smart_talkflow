@@ -5,7 +5,7 @@ from infra.logger import setup_logging
 from orchestrator.base import (
     WorkflowExecutionContext, WorkflowRegistry, WorkflowResult,
 )
-from runtime.context import get_operator
+from runtime.context import get_operator, set_process_id
 from utils.trace_id_util import get_trace_id
 
 logger = setup_logging(__name__)
@@ -44,8 +44,8 @@ class WorkflowDispatcher:
             logger.warning("未知工作流: %s", name)
             return WorkflowResult(output=f"未知工作流: {name}", is_error=True)
 
-        # 3. 权限网关:operator 角色不在 workflow.allowed_roles 则直接拒执行
-        if not workflow.is_allowed(operator):
+        # 3. 权限:operator 角色不在 workflow_role 配置的允许集合内则拒执行
+        if not await workflow.is_allowed(operator):
             logger.warning("用户 %s 无权触发工作流 %s", operator.user_id, name)
             return WorkflowResult(output="您没有该操作的权限", is_error=True)
 
@@ -117,6 +117,10 @@ class WorkflowDispatcher:
                         "process_id": checked.process.id if checked.process else None,
                     },
                 )
+
+        # 回填 process_id 到请求上下文,供 adapter 落 adapter_call_logs 关联
+        if checked is not None and checked.process is not None:
+            set_process_id(checked.process.id)
 
         # 6. 执行工作流
         try:

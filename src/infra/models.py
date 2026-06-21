@@ -25,7 +25,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import BigInteger, DateTime, Integer, JSON, String, Text, func
+from sqlalchemy import BigInteger, DateTime, Integer, JSON, String, Text, UniqueConstraint, func
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -193,3 +193,20 @@ class AuditLog(Base):
     detail: Mapped[dict | None] = mapped_column(JSON)
     ip_address: Mapped[str | None] = mapped_column(String(64))
     trace_id: Mapped[str | None] = mapped_column(String(64))
+
+
+class WorkflowRole(Base):
+    """工作流角色准入(层 A RBAC 配置,对应 ``workflow_role``)。
+
+    一个 workflow 多个 role(多行);**无记录 = 全员可用**。运行时增删即生效
+    (配合 :class:`~infra.permission.WorkflowRoleChecker` 的 invalidate / 缓存 TTL)。
+    """
+
+    __tablename__ = "workflow_role"
+    __table_args__ = (
+        UniqueConstraint("workflow_name", "role", name="uk_workflow_role"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    workflow_name: Mapped[str] = mapped_column(String(64), nullable=False)
+    role: Mapped[str] = mapped_column(String(64), nullable=False)

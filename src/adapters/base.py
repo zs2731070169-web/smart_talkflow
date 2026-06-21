@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from typing import Any, ClassVar
 
 import httpx
+from sqlalchemy.exc import SQLAlchemyError
 
 from infra import http
 from infra.exceptions import (
@@ -26,9 +27,12 @@ from infra.exceptions import (
     ServiceUnavailableException,
     GatewayTimeoutException,
 )
+from infra.database import db_session
 from infra.logger import setup_logging
-from runtime.context import get_operator
+from infra.models import AdapterCallLog
+from runtime.context import get_operator, get_process_id
 from services.credential import CredentialProvider, default_credential_provider
+from utils.trace_id_util import get_trace_id
 
 logger = setup_logging(__name__)
 
@@ -185,6 +189,30 @@ class BaseAdapter(ABC):
             traced_payload["body"] = request_payload
         if request_params:
             traced_payload["params"] = request_params
+
+        # 落库审计:每次下游 HTTP 调用一条留痕(operator/tenant/credential/trace/process 关联)。
+        # 落库失败只记日志、不影响主流程(下游调用结果已拿到)。
+        try:
+            async with db_session() as session:
+                session.add(AdapterCallLog(
+                    process_id=get_process_id(),
+                    step_execution_id=None,  # 阶段一留空,靠 process_id 逻辑关联
+                    adapter=self.adapter_name,
+                    target_system=self.target_system,
+                    action=request.action,
+                    method=request.method,
+                    http_status=http_status,
+                    request_payload=traced_payload,
+                    response_payload=response_payload,
+                    error_message=error_message,
+                    duration_ms=duration,
+                    trace_id=get_trace_id(),
+                    operator_id=operator.user_id if operator else None,
+                    tenant_id=operator.tenant_id if operator else None,
+                    credential_source="service_account_delegated" if operator else None,
+                ))
+        except SQLAlchemyError:
+            logger.exception("落库 AdapterCallLog 失败(action=%s)", request.action)
 
         return AdapterResponse(
             adapter=self.adapter_name,
