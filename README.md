@@ -73,13 +73,13 @@
 - 🛡️ **Pydantic 强校验,挡住 LLM 幻觉**——LLM 输出的每一个参数都过 Schema 校验,越界值绝不透传给下游。
 - 🔁 **业务键级幂等 + 状态机**——以 `UNIQUE(process_key, business_key)` 兜底,命中记录按 `running / completed / failed / reject` 分流:已完成的直接短路,失败的按重试计数放行或永久拒绝。
 - 🔐 **两层认证 + 代签**——开发态信任请求头、生产态走 SSO/JWT(JWKS 公钥经 Redis 缓存验签);真实操作人经 HMAC 代签给下游,服务账号只做技术认证,审计与权限始终归属真实用户(代签依赖下游支持,如 yudao 的 `AgentDelegationFilter`;不支持代签的系统审计会降级为服务账号级别)。
-- 🧭 **角色权限网关**——每个工作流声明 `allowed_roles`,编排器在执行前判定操作人是否有权触发,把越权请求挡在编排层。
+- 🧭 **配置化角色权限(RBAC)**——独立权限层 `WorkflowRoleChecker` 查 `workflow_role` 表(「工作流 → 允许角色」策略),在执行前比对 `operator.roles`(空集=全员可用,非空按角色命中);查询经 Redis 缓存,**策略由运维增删、改完即时生效,无需重启**。`is_allowed` 已从工作流基类下沉到此,工作流本身不掺权限。
 - 🧩 **LLM 抽象层,屏蔽厂商差异**——一套 `SupportsInvokeMessages` 协议统一 OpenAI / Anthropic,Function Calling / Tool Use 归一为 `ToolUseBlock`,切换厂商只改环境变量。
 - 📡 **SSE 流式反馈**——意图解析与工具执行的过程实时以 `text / tool_started / tool_completed` 事件推回前端,长流程不阻塞。
 - 📝 **提示词三级降级**——远程 git 仓库 > 自定义 > 内置默认,任一来源失败自动降级,支持提示词热更新与版本化。
 - 🔍 **全链路 Trace ID**——每条请求生成唯一 `trace_id`,贯穿日志、数据库记录、对外 HTTP 调用头,出问题可像"查案"一样还原现场。
 - 🧱 **一次调用一条留痕**——适配器把下游真实 HTTP 状态码归一为业务异常,但**不向上抛**,而是结构化为 `AdapterResponse` 落库,保证审计完整性。
-- 🏗️ **为未来阶段预留**——单步执行表已内置 `compensation_status` 字段,为阶段四的 Saga 补偿提前铺路,避免日后改表。
+- 🧱 **声明式 Saga 补偿 + 步骤留痕闭环**——每步可声明 `compensate`(会议室三步均声明 cancel),任一步失败由步骤执行引擎**逆序补偿**已成功步(整笔原子);每步经 `process_step` 落库(`running→completed/failed` + `compensation_status`),外部 HTTP 调用经 `step_id` 关联到所属步,「凭一个 operator 串联该用户所有下游调用」。
 - 🐳 **一键基础设施**——`docker compose up` 即起 MySQL 8 + Redis 7,容器首次启动自动建表,本地零配置。
 
 ## 架构总览
@@ -147,7 +147,7 @@ graph TD
 | **3** | **工具标准化** | 适配层暴露标准 `GET /tools` + `POST /invoke`,编排层经 `ToolRegistry` 工具注册中心统一发现与调用 | 📋 规划中 |
 | **4** | **长程任务可靠性** | 异步调度 + 事件驱动恢复 + 人工审批节点 + Saga 补偿引擎 + 超时扫描 | 📋 规划中 |
 
-**阶段一当前进度**:基础设施层(DB/HTTP/日志/异常/幂等/Redis)、认证层(JWKS/SSO)、编排层(注册器 + 调度器 + 权限网关 + 幂等状态机)、OA 适配器(含代签)、会议室预订流程、SSE 流式管线均已落地。**当前缺口**是意图解析核心 `IntentParser.run()`(尚为骨架)——它补齐后,端到端「自然语言 → 自动执行」才算闭环;`WorkflowDispatcher` 已就绪但尚未接入主链路。
+**阶段一当前进度**:基础设施层(DB/HTTP/日志/异常/Redis)、认证层(JWKS/SSO)、编排层(注册器 + 调度器 + 步骤执行引擎 + 幂等状态机)、**配置化 RBAC 权限层**(`workflow_role` + Redis 缓存)、**`process_step` 步骤留痕闭环 + 声明式 Saga 补偿**、OA 适配器(含代签:api-key 哈希比对 + nonce 防重放 + 恒定时间验签)、会议室预订流程、SSE 流式管线均已落地。**当前缺口**是意图解析核心 `IntentParser.run()`(尚为骨架)——它补齐后,端到端「自然语言 → 自动执行」才算闭环;`WorkflowDispatcher` 已就绪但尚未接入主链路。崩溃自动恢复(心跳存活 + 重跑)属后续方向,方案见 `SSD/流程崩溃自动恢复落地计划.md`(**设计阶段,代码未实现**)。
 
 **各阶段验收标准**(摘要):
 
@@ -156,7 +156,7 @@ graph TD
 - **阶段 3**:适配层暴露标准 `GET /tools` 与 `POST /invoke`,可用 curl/Postman 直接调试;`ToolRegistry` 启动扫描并缓存工具目录,加载期即可校验 YAML 引用一致性。
 - **阶段 4**:长程任务"提交即返回",编排层重启后能从 WAITING 状态恢复;失败自动补偿或告警。
 
-> 完整设计文档见 [`SSD/传统业务系统接入 Agent 落地计划.md`](./SSD/) 与 [`SSD/用户认证与操作权限控制落地计划.md`](./SSD/)。
+> 完整设计文档见 [`SSD/`](./SSD/):总纲《传统业务系统接入 Agent 落地计划 v1.0.md》、《用户认证与操作权限控制落地计划.md》、《流程崩溃自动恢复落地计划.md》(心跳存活检测 + 崩溃自动重跑,**设计阶段、代码未实现**)。
 
 ## 技术栈
 
@@ -192,7 +192,7 @@ smart_talkflow/
 │   │   │   ├── system_prompt.py  # ✅ 主控提示词(远程/自定义/默认三级降级)
 │   │   │   └── envirement.py     # ✅ 运行环境信息
 │   │   ├── stream_event.py       # ✅ 编排层流式事件(AssistantTextDelta / ToolExecution*)
-│   │   └── parser.py             # 🚧 IntentParser 意图解析(当前骨架)
+│   │   └── parser.py             # 🚧 IntentParser 意图解析(当前骨架,主线缺口)
 │   ├── security/                 # 认证层
 │   │   └── jwks_client.py        # ✅ JWKS 公钥解析 + Redis 缓存(JWT RS256 验签)
 │   ├── api/                      # FastAPI 路由层
@@ -200,16 +200,18 @@ smart_talkflow/
 │   │   ├── deps.py               # ✅ 认证依赖(开发态请求头 / 生产态 SSO)
 │   │   └── schema.py             # ✅ 请求/响应 DTO(ChatRequest)
 │   ├── orchestrator/             # 编排层
-│   │   ├── base.py               # ✅ BaseWorkflow + WorkflowRegistry(含角色权限)
+│   │   ├── base.py               # ✅ BaseWorkflow(声明式 steps)+ WorkflowRegistry
+│   │   ├── workflow_engine.py    # ✅ 步骤执行引擎(forward + 逆序 compensate + run_steps)
 │   │   ├── dispatcher.py         # ✅ WorkflowDispatcher(权限→校验→幂等→执行→状态机)
+│   │   ├── idempotency.py        # ✅ 流程级幂等(状态机 + 重试计数,纯逻辑层)
 │   │   ├── resolver.py           # 🚧 身份补全(查 HR 主数据、重名反问)
 │   │   └── workflow/
-│   │       └── meeting_room.py   # ✅ 会议室预订流程(提交→审批→更新状态)
+│   │       └── meeting_room.py   # ✅ 会议室预订流程(提交→审批→更新状态,三步均带补偿)
 │   ├── runtime/                  # 请求级执行上下文
 │   │   ├── context.py            # ✅ OperatorContext / RequestContext(ContextVar)
 │   │   └── runner.py             # ✅ 启动装配工厂 + 每请求 Runtime.run(SSE)
-│   ├── adapters/                 # 适配层(封装传统系统 HTTP 调用 + 代签)
-│   │   ├── base.py               # ✅ BaseAdapter(错误码归一 + 结构化留痕)
+│   ├── adapters/                 # 适配层(封装传统系统 HTTP 调用 + 代签 + 留痕)
+│   │   ├── base.py               # ✅ BaseAdapter(错误码归一 + 结构化 AdapterResponse 留痕)
 │   │   ├── oa_adapter/           # ✅ OA 域(oa_client 聚合 + 会议室预订 adapter)
 │   │   ├── crm_adapter/          # 🚧 CRM 客户端骨架
 │   │   ├── ecs_adapter/          # 🚧 ECS 客户端骨架
@@ -218,21 +220,26 @@ smart_talkflow/
 │   │   ├── credential.py         # ✅ 代签凭证(服务账号 + operator HMAC)
 │   │   ├── email.py              # 🚧 邮箱服务骨架
 │   │   └── memory.py             # 🚧 记忆服务骨架
-│   ├── infra/                    # 基础设施(✅ 已完成)
+│   ├── permission/               # 权限层(层 A RBAC)
+│   │   └── permission.py         # ✅ WorkflowRoleChecker(workflow_role 表 + Redis 缓存 + is_allowed)
+│   ├── repository/               # 数据访问层(ORM 模型 + 表 CRUD)
+│   │   ├── models.py             # ✅ 5 张业务无关 ORM 模型 + workflow_role(RBAC)
+│   │   ├── process_tracker.py    # ✅ process 表 CRUD + 状态转换(幂等 DB 操作下沉于此)
+│   │   └── step_tracker.py       # ✅ process_step 落库(running→completed/failed + 补偿状态)
+│   ├── infra/                    # 基础设施(✅ 纯技术设施,无业务/数据模型)
 │   │   ├── database.py           # ✅ SQLAlchemy 异步引擎 + 连接池 + 会话管理
-│   │   ├── models.py             # ✅ 5 张业务无关 ORM 模型
 │   │   ├── http.py               # ✅ httpx 异步封装(trace_id 自动注入)
 │   │   ├── logger.py             # ✅ 分级日志(TraceIdFilter)
 │   │   ├── exceptions.py         # ✅ HTTP 业务异常体系(11 个状态码子类)
-│   │   ├── idempotency.py        # ✅ 流程级幂等(状态机 + 重试计数)
 │   │   └── redis_client.py       # ✅ Redis 异步单例
 │   └── utils/
-│       └── trace_id_util.py      # ✅ 全链路 Trace ID(ContextVar)
+│       ├── trace_id_util.py      # ✅ 全链路 Trace ID(ContextVar)
+│       └── api_key_util.py       # ✅ 生成 api-key + SHA-256 哈希(python -m utils.api_key_util)
 ├── tests/                        # 标准库 unittest(test_llm_client 为真实 LLM 冒烟)
 ├── db/
-│   ├── smart_talkflow_init.sql   # 5 张平台表建表脚本(容器首次启动自动执行)
+│   ├── smart_talkflow_init.sql   # 5 张平台表 + workflow_role(RBAC)建表脚本(容器首次启动自动执行)
 │   └── schema_diagram.md         # 数据库 ER 关系图与设计说明
-├── SSD/                          # 系统设计文档(落地计划 + 认证权限设计)
+├── SSD/                          # 系统设计文档(总纲 v1.0 + 认证权限 + 流程崩溃恢复[设计阶段])
 ├── docker-compose.yml            # MySQL 8 + Redis 7 一键编排
 ├── pyproject.toml                # uv 项目定义与依赖
 └── .env.example                  # 环境变量模板
@@ -320,7 +327,7 @@ LLM 可能编造不存在的部门名或会议室号。所有 LLM 输出都经 P
 
 ### 下游业务系统(OA)
 
-> 凭证按系统扁平配置:每个下游系统一组 `{SYSTEM}_BASE_URL` / `{SYSTEM}_API_KEY` / `{SYSTEM}_DELEGATION_SECRET`(当前为 `OA_*`)。**新增系统时加一组同前缀变量**,并在 `config.py` 的 `CONFIGURED_DOWNSTREAM_SYSTEMS` 清单登记一项、注册对应的凭证 provider 即可,无需改配置结构与底座。
+> 凭证按系统扁平配置:每个下游系统一组 `{SYSTEM}_BASE_URL` / `{SYSTEM}_API_KEY` / `{SYSTEM}_DELEGATION_SECRET`(当前为 `OA_*`)。**新增系统时加一组同前缀变量**,再在 `services/credential.py` 的 `default_credential_provider` 注册对应凭证 provider 即可,无需改配置结构与底座。
 
 | 变量 | 说明 | 默认 |
 |---|---|---|
@@ -337,6 +344,7 @@ LLM 可能编造不存在的部门名或会议室号。所有 LLM 输出都经 P
 | `SSO_JWKS_URI` | JWKS 公钥端点(生产态必填) | — |
 | `SSO_AUDIENCE` | JWT audience(留空不校验) | — |
 | `SSO_JWKS_CACHE_TTL` | JWKS Redis 缓存秒数 | `3600` |
+| `WORKFLOW_ROLE_CACHE_TTL` | 工作流角色准入(RBAC)Redis 缓存秒数;改策略后 `invalidate` 立即生效,否则等 TTL | `300` |
 
 ### Redis 与提示词仓库
 
@@ -349,7 +357,7 @@ LLM 可能编造不存在的部门名或会议室号。所有 LLM 输出都经 P
 
 ## 数据库设计
 
-平台共 **5 张业务无关表**,完整 ER 图与设计说明见 [`db/schema_diagram.md`](./db/schema_diagram.md)。
+平台共 **5 张业务无关表 + 1 张 RBAC 配置表**(`workflow_role`),完整 ER 图与设计说明见 [`db/schema_diagram.md`](./db/schema_diagram.md)。
 
 ```mermaid
 erDiagram
@@ -405,6 +413,10 @@ erDiagram
         varchar resource_id
         varchar business_key "业务侧追溯键"
     }
+    workflow_role {
+        varchar workflow_name "工作流标识"
+        varchar role           "允许角色(空表=全员可用)"
+    }
 ```
 
 **关联层次**:强外键关系(请求→流程、流程→步骤)**故意不加物理外键**;日志表(适配调用、审计)为"逻辑关联",保证日志独立于业务记录存活,满足审计不可篡改要求。
@@ -438,11 +450,11 @@ PYTHONPATH=src python -m unittest tests.test_idempotency   # 单个模块
 
 ```python
 from infra.database import db_session
-from infra.models import Process
+from repository.models import Process
 
 async with db_session() as session:
     session.add(Process(process_key="meeting_room_booking", business_key="...", ...))
-    await session.flush()   # ⚠️ autoflush=False,写库必须显式 flush
+    await session.flush()  # ⚠️ autoflush=False,写库必须显式 flush
 # 正常退出自动 commit;异常自动 rollback 并重新抛出
 ```
 

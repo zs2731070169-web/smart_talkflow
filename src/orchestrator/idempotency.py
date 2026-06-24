@@ -24,7 +24,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
 from infra.database import db_session
-from infra.models import Process
+from repository.models import Process
 
 # 幂等键最大长度
 _MAX_IDEM_KEY_LEN = 160

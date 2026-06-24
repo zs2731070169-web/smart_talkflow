@@ -51,13 +51,19 @@ graph TD
 
 | 模块         | 职责                                            | 关键类/函数                                   | 代码位置                         |
 | ------------ | ----------------------------------------------- | --------------------------------------------- | -------------------------------- |
-| Agent 解析器 | 接收自然语言，调用 LLM 提取意图与参数，缺参反问 | IntentParser.parse(user_input) -> AgentIntent | agent/parser.py                  |
-| 身份解析器   | 按姓名+部门查 HR 主数据补全身份证号，重名则反问 | EmployeeResolver.resolve(name, dept)          | orchestrator/resolver.py         |
-| 硬编码编排器 | 针对入职单场景，写死「建档→开户→邮箱」执行顺序  | OnboardingOrchestrator.run(params)            | orchestrator/onboarding.py       |
-| 适配器       | 直接封装 OA/CRM/邮箱 的 HTTP 调用               | OAAdapter / EmailAdapter                      | adapters/oa.py adapters/email.py |
-| 幂等控制器   | 基于身份证号（业务唯一键）防重复执行            | IdempotencyChecker.check(business_key)        | core/idempotency.py              |
+| Agent 解析器 | 接收自然语言，调用 LLM 提取意图与参数，缺参反问 | IntentParser.run()（骨架,未实现）             | engine/parser.py                 |
+| 身份解析器   | 按姓名+部门查 HR 主数据补全身份证号，重名则反问 | （空,未实现）                                 | orchestrator/resolver.py         |
+| 编排抽象     | 声明式步骤编排:子类声明 steps,execute 委托引擎 | BaseWorkflow / WorkflowRegistry               | orchestrator/base.py             |
+| 步骤引擎     | 顺序执行 + 每步留痕 + 失败逆序补偿(Saga)      | workflow_engine.run_steps / StepContext       | orchestrator/workflow_engine.py  |
+| 调度入口     | 认证→路由→权限→校验→幂等→执行→状态            | WorkflowDispatcher.dispatch                   | orchestrator/dispatcher.py       |
+| 具体流程     | 当前唯一注册:会议室预订(submit→approve→update,带 cancel 补偿) | MeetingRoomBookingWorkflow       | orchestrator/workflow/meeting_room.py |
+| 适配器       | 封装下游 HTTP(错误码归一 + 每次留痕);oa 已实现 | BaseAdapter / OAClient                        | adapters/base.py adapters/oa_adapter/ |
+| 幂等控制器   | 基于业务唯一键防重复执行(状态机)              | IdempotencyChecker.check(check_request)       | orchestrator/idempotency.py      |
+| 步骤留痕     | process_step 落库(每步 running→completed/failed) | create_step / finish_step / update_compensation | repository/step_tracker.py    |
 
 ### **数据流时序图**
+
+> 以下以**入职为设计蓝本**演示(5 步:建档→开户→权限→业务授权→邮箱)。**阶段一实际落地的是会议室预订**(3 步:submit→approve→update,带 cancel 补偿),流程结构同构(意图→幂等→多步下游→落库)。
 
 ```mermaid
 sequenceDiagram
@@ -118,51 +124,40 @@ sequenceDiagram
 
 ```
 smart_talkflow/
-├── prompts
-├── main.py                  # FastAPI 应用装配与启动（生命周期、挂载路由/中间件、注册全局异常处理器）
-├── config.py                # 环境变量与配置（Pydantic Settings：DB URL、LLM Key、各系统 BaseURL/超时）
-├── requirements.txt
-├── .env.example             # 环境变量样例（占位值，不含密钥真值）
-├── api/
-│   ├── __init__.py
-│   ├── deps.py              # 依赖注入：get_db（DB Session）、当前操作人等
-│   ├── router.py            # /chat 与 /execute 路由定义
-│   └── schema.py            # HTTP 请求/响应 DTO（Pydantic）
-├── runtime/                 # 请求级执行上下文：每请求构建一个，承载意图/参数/幂等键/步骤中间产物，用完即弃（不持久化）
-│   ├── __init__.py       
-│   ├── context.py           # RequestContext：聚合, deps.py 里加 get_request_context 注入外壳
-│   ├── RequestRunner.py     # 每请求构建的执行对象，串联 parse → resolve → 幂等 → orchestrator
-├── engine/
-│   ├── __init__.py
-│   ├── parser.py            # LLM 意图解析 + 参数提取 + 缺参反问
-│   ├── llm_client.py        # LLM 客户端封装（OpenAI/Anthropic、超时、重试、Function Calling）
-│   ├── prompts.py           # 意图识别 Prompt 管理（含可用流程描述与 few-shot）
-│   └── models.py            # AgentIntent、LLMMessage 等 Pydantic 模型
-├── orchestrator/
-|   ├── actions/
-|   |   ├── __init__.py
-|   |   └── onboarding.py    # 硬编码入职流程（建档→开户→邮箱）
-│   ├── __init__.py
-│   ├── dispatcher.py        # intent → 对应编排器的路由分发
-│   └── resolver.py          # 数据补全和反问
-├── adapters/
-│   ├── __init__.py
-│   ├── base.py              # 适配器基类：共享 httpx.AsyncClient、超时、错误码归一等
-│   ├── oa_client.py     # OA REST
-│   ├── oa_adapter/
-│		│   ├── authorization.py # 权限域控 (按部门/岗位分配角色, 加入用户组, 开通业务系统)
-│   │   ├── employee.py      #【员工域】建档 / 查员工 / 变更状态 (create_employee)
-│   │   └── identity.py      #【身份/认证域】建域账号 / 改密 / 禁用（create_account）  
-├── services/
-│   └── email.py             # 邮箱系统 HTTP 封装（create_mailbox）
-├── infra/
-│   ├── __init__.py
-│   ├── database.py          # SQLAlchemy engine + SessionLocal + Base（连接/会话管理）
-│   ├── models.py            # SQLAlchemy 流程实例 ORM 模型 ProcessInstance（与 api/schema.py 区分）
-│   ├── idempotency.py       # 幂等校验逻辑（依赖 UNIQUE(process_key, business_key)）
-│   ├── http.py              # 封装统一的http请求
-│   └── exceptions.py        # 业务/适配器异常定义（供 main.py 全局异常处理器捕获）
-└── tests/                   # 冒烟测试：重复请求幂等、参数越界校验、邮箱失败无补偿留痕
+├── src/                         # 运行时包根(代码内 import 无 src. 前缀,需 PYTHONPATH=src)
+│   ├── main.py                  # FastAPI 入口 + lifespan(build_runtime 装配,停机释放 DB 引擎/redis)
+│   ├── conf/config.py           # pydantic-settings 单例(必填项缺失启动即抛错)
+│   ├── api/                     # /chat 路由(SSE 流式)+ 认证依赖
+│   │   ├── deps.py              # get_current_operator(开发态信任 X-Operator-* 头 / 生产态 SSO 验签)
+│   │   └── router.py
+│   ├── engine/                  # LLM 引擎(厂商无关抽象;parser 仍为骨架)
+│   │   ├── parser.py            # IntentParser.run() 骨架(意图解析+参数提取,未实现)
+│   │   ├── client/              # messages / base_client / llm_client(OpenAI/Anthropic 归一为 ToolUseBlock)
+│   │   ├── prompts/             # system_prompt(三级降级)/ envirement
+│   │   └── stream_event.py      # 编排层流式事件(与 client 层 ApiStreamEvent 区分)
+│   ├── security/                # SSO JWT(RS256)验签:jwks_client + redis 缓存
+│   ├── orchestrator/            # 编排层
+│   │   ├── base.py              # 抽象:BaseWorkflow(步骤式,execute 委托引擎)+ WorkflowRegistry
+│   │   ├── workflow_engine.py   # 步骤执行引擎:run_steps / StepContext / WorkflowStep / StepMeta + 逆序补偿
+│   │   ├── dispatcher.py        # 调度入口:认证→路由→权限→校验→幂等→执行→状态(_check_idempotency/_finalize 模块级)
+│   │   ├── workflow/meeting_room.py  # 当前唯一注册流程(声明式 Saga:submit→approve→update,每步带 cancel 补偿)
+│   │   └── resolver.py          # 空(身份补全,未实现)
+│   ├── runtime/
+│   │   ├── context.py           # OperatorContext / RequestContext(ContextVar:operator/trace_id/process_id/step_id)
+│   │   └── runner.py            # build_runtime(启动装配)/ Runtime.run(每请求执行)
+│   ├── adapters/                # 下游 HTTP 封装(错误码归一 + 每次 AdapterCallLog 留痕)
+│   │   ├── base.py              # BaseAdapter / AdapterRequest / AdapterResult(data) / AdapterResponse
+│   │   ├── oa_adapter/          # oa_client(单例)+ oa_meeting_room(submit/approve/update/cancel)
+│   │   └── crm_adapter/ ecs_adapter/ erp_adapter/   # 骨架
+│   ├── services/                # credential(代签凭证)/ email / memory(后两者骨架)
+│   ├── permission/              # WorkflowRoleChecker(workflow_role 表 + redis + is_allowed,已从 BaseWorkflow 下沉)
+│   ├── repository/               # 数据访问:models(5 张业务无关表 + workflow_role)/ process_tracker(process 表 CRUD/状态转换)/ step_tracker(process_step 落库)
+│   ├── infra/                    # 纯技术设施:database / http / logger / exceptions / redis_client
+│   └── utils/                   # trace_id_util / api_key_util
+├── db/                          # smart_talkflow_init.sql(MySQL 建表,改需清卷重建)+ schema_diagram.md
+├── tests/                       # unittest(IsolatedAsyncioTestCase);test_llm_client 为真实 LLM 冒烟
+├── SSD/                         # 设计文档(本文件 + 用户认证与操作权限控制 + 流程崩溃自动恢复)
+└── docker-compose.yml           # MySQL 8 + Redis 7
 ```
 
 ### **埋坑点**
@@ -170,8 +165,8 @@ smart_talkflow/
 1. **LLM 参数幻觉**：LLM 可能编造不存在的部门名称。必须在编排层用 Pydantic `validator` 或枚举值强校验，不合法参数绝不透传给下游 OA。
 2. **幂等键**：不能用 `name` 做幂等键（重名），必须用身份证号等业务唯一键；但用户说「给市场部张三办入职」通常**不含身份证号**。因此执行前需先按 `姓名+部门` 查 HR 主数据补全身份证号（命中多条则反问用户选择），再以补全后的键做幂等校验。数据库加唯一索引 `UNIQUE(process_key, business_key)`。
 3. **同步阻塞风险**：传统系统接口可能长时间不返回（如 30 秒），会阻塞 FastAPI 处理。本阶段用 `httpx.AsyncClient(timeout=10)` 严格限制，超时即报错，绝不无限等待。
-4. **无补偿的灾难**：三步顺序执行，若 Step 3（邮箱）失败，Step 1/2（建档/开户）已落地且**本阶段无自动回滚**，必须人工介入。每一步执行后在代码里预留 `# TODO: compensate` 钩子，为阶段4 的 Saga 补偿铺路。
-5. **下游身份与鉴权未打通**：适配器裸调下游必然 401；且**不能用「超级服务账号代替所有人」**——下游权限模型会崩溃、审计归零。阶段一即须落地「服务账号 + operator 代签」（方案④），并修正 `operator` 当前从请求体 `arguments` 取（可伪造）的隐患——`operator` 必须来自 SSO 登录态（信任根）。详见 [《用户认证与操作权限控制落地计划》](用户认证与操作权限控制落地计划.md)。
+4. **补偿已落地（更新）**：任一步失败,已成功步由 `workflow_engine` 逆序补偿（Saga,per-step 声明 `compensate`）——会议室场景用 yudao `PUT /cancel`（终态覆盖、幂等）整笔回滚。原计划「阶段4 才做补偿」已**提前到阶段一落地**。
+5. **下游身份与鉴权（已落地）**：「服务账号 + operator 代签」已落地（`services/credential._build_agent_headers`:api-key SHA-256 哈希比对 + nonce Redis 防重放 + HMAC 恒定时间);`operator` 来自认证层（`api/deps.get_current_operator`,开发态请求头 / 生产态 SSO 验签）,不再从请求体取。详见 [《用户认证与操作权限控制落地计划》](用户认证与操作权限控制落地计划.md)。
 
 ### **挑战点**
 
@@ -231,7 +226,7 @@ sequenceDiagram
     actor Dev as 开发/业务
     participant File as processes/onboarding.yaml
     participant Engine as WorkflowEngine
-    participant DB as MySQLSQL
+    participant DB as MySQL
     participant Reg as AdapterRegistry
     participant OA_Svc as OA适配服务
 
@@ -259,7 +254,7 @@ sequenceDiagram
 ### **工程代码模块划分**
 
 ```
-oa_agent/
+smart_talkflow/
 ├── main.py
 ├── api/   
 │   ├── __init__.py
@@ -271,15 +266,16 @@ oa_agent/
 │   └── employee_offboarding.yaml
 ├── engine/
 │   ├── parser.py                    # LLM 意图解析 + 参数提取 + 缺参反问
-│   ├── llm_client.py                # LLM 客户端封装（OpenAI/Anthropic、超时、重试、Function Calling）
-│   ├── prompts.py                   # 意图识别 Prompt 模板（含可用流程描述与 few-shot）
-│   └── models.py                    # AgentIntent、LLMMessage 等 Pydantic 模型
+│   ├── client/                      # llm_client / base_client / messages（OpenAI/Anthropic 归一为 ToolUseBlock）
+│   ├── prompts/                     # system_prompt（三级降级）/ envirement
+│   └── stream_event.py              # 编排层流式事件（与 client 层 ApiStreamEvent 区分）
 ├── orchestrator/
 │   ├── __init__.py
 │   ├── loader.py                    # ⭐ YAML 热加载器 (watchdog)
-│   ├── models.py                    # MySQLSQL 数据模型
+│   ├── models.py                    # MySQL 数据模型
 │   ├── context.py                   # ⭐ 上下文解析器
-│   └── workflow_engine.py           # ⭐ 通用 WorkflowEngine
+│   ├── workflow_engine.py           # ⭐ 通用 WorkflowEngine
+│   └── idempotency.py               # 幂等状态机(从 infra 移入)
 ├── adapters/                        # ⭐ 变为独立服务目录
 │   ├── registry.py                  # ⭐ AdapterRegistry 服务发现                        
 │   ├── oa_adapter/
@@ -291,13 +287,14 @@ oa_agent/
 │   │   └── client.py
 │   └── shared/                      # 适配层公共库（日志、错误码）
 │       └── schemas.py
+├── repository/
+│   ├── models.py                    # 5 张业务无关表(process / process_step / adapter_call_logs / request_logs / audit_logs) + workflow_role(RBAC)
+│   ├── process_tracker.py           # process 表 CRUD + 状态转换(幂等逻辑下沉到此)
+│   └── step_tracker.py              # process_step 落库
 ├── infra/
-│   ├── models.py
-│   ├── database.py                  # SQLAlchemy engine + SessionLocal + Base（连接/会话管理）
-│   ├── models.py                    # SQLAlchemy 流程实例 ORM 模型 ProcessInstance（与 api/schema.py 区分）
-│   ├── idempotency.py               # 幂等校验逻辑（依赖 UNIQUE(process_key, business_key)）
-│   ├── exceptions.py                # 业务/适配器异常定义（供 main.py 全局异常处理器捕获）
-│   └── rules.py                     # ⭐ 轻量规则引擎
+│   ├── database.py                  # SQLAlchemy 异步引擎 + 会话
+│   ├── exceptions.py                # ApiException + 状态码子类
+│   └── rules.py                     # ⭐ 轻量规则引擎（阶段二新增）
 └── requirements.txt
 ```
 
@@ -390,7 +387,7 @@ sequenceDiagram
 ### 工程代码模块划分
 
 ```
-oa_agent/
+smart_talkflow/
 ├── main.py
 ├── api/   
 │   ├── __init__.py
@@ -405,7 +402,7 @@ oa_agent/
 ├── orchestrator/
 │   ├── __init__.py
 │   ├── loader.py                    # YAML 热加载器 (watchdog)
-│   ├── models.py                    # MySQLSQL 数据模型
+│   ├── models.py                    # MySQL 数据模型
 │   ├── context.py                   # 上下文解析器
 │   └── tool_registry.py             # ⭐ 新增：ToolRegistry 工具发现与缓存
 ├── adapters/                        # ⭐ 每个适配层暴露 GET /tools + POST /invoke
@@ -481,7 +478,7 @@ graph TD
 | 任务队列 | Celery + Redis            | 成熟，Python 生态完善，支持延迟任务和重试          |
 | 定时任务 | APScheduler               | 扫描超时实例、兜底轮询                             |
 | 消息总线 | Redis Pub/Sub 或 RabbitMQ | 适配层完成事件后，通过消息队列通知编排层           |
-| 状态存储 | MySQLSQL                  | 主状态；Redis 做分布式锁和幂等缓存                 |
+| 状态存储 | MySQL                  | 主状态；Redis 做分布式锁和幂等缓存                 |
 | 补偿引擎 | 自研事物协调器            | 逆序调用补偿 Tool，记录补偿日志                    |
 | 审批网关 | FastAPI 独立路由          | /api/v1/approvals/{instance_id} 供外部审批系统对接 |
 
@@ -567,7 +564,7 @@ sequenceDiagram
 ### 工程代码模块划分
 
 ```
-oa_agent/
+smart_talkflow/
 ├── main.py
 ├── api/   
 │   │   ├── chat.py                  # 用户对话入口
@@ -583,7 +580,7 @@ oa_agent/
 ├── orchestrator/
 │   ├── __init__.py
 │   ├── loader.py                    # YAML 热加载器 (watchdog)
-│   ├── models.py                    # MySQLSQL 数据模型
+│   ├── models.py                    # MySQL 数据模型
 │   ├── context.py                   # 上下文解析器
 │   ├── tool_registry.py             # ⭐ ToolRegistry 工具发现与缓存
 │   ├── async_scheduler.py           # ⭐ Async 调度器
@@ -641,7 +638,7 @@ oa_agent/
 
 | 阶段  | 验收标准（必须全部通过）                                     |
 | ----- | ------------------------------------------------------------ |
-| 阶段1 | 1. 用户说一句"给张三办入职"，30 秒内得到成功回复；<br />2. 数据库能查到完整的实例记录；<br />3. 同一句话重复说，不会重复建账号；<br />4. 下游审计日志记的是**真实操作人**而非服务账号，篡改 operator 头会被下游拒绝。 |
+| 阶段1 | 1. 用户说一句"帮我订明天 10 点第一会议室"(以会议室预订为交付场景;入职为结构同构的设计蓝本),30 秒内得到成功回复；<br />2. 数据库能查到完整的实例记录(process + process_step + adapter_call_logs)；<br />3. 同一请求重复发,不会重复建预订(幂等)；<br />4. 下游审计日志记的是**真实操作人**而非服务账号,篡改 operator 头会被下游拒绝；<br />5. 任一步失败,已成功步逆序 cancel(Saga 补偿已落地)。 |
 | 阶段2 | 1. 新增一个"离职流程"只需新增 YAML 文件，不改 Python 代码；<br />2. 适配层独立部署，编排层通过配置发现它；<br />3. 热加载生效时间 < 5 秒。 |
 | 阶段3 | 1. 适配层暴露标准 `GET /tools` 与 `POST /invoke`，可用 curl/Postman 直接调试；<br />2. 编排层通过 `ToolRegistry` 发现并缓存工具目录，按 `adapter`+`tool` 经 HTTP 调用；<br />3. 工具 Schema 完整清晰，编排层加载期即可校验 YAML 引用一致性。 |
 | 阶段4 | 1. 长程任务（模拟 10 分钟）提交后，用户立即收到"已受理"回复；<br />2. 编排层重启后，流程能从 WAITING 状态正确恢复；<br />3. 超时后自动触发补偿或告警；<br />4. 人工审批拒绝后，已创建的账号被自动撤销。 |
@@ -687,7 +684,7 @@ oa_agent/
 1. **Agent 层**：LLM 提取的参数必须经过 Pydantic Schema 校验，拒绝任何越界参数（如 `dept="管理员"` 但 Schema 里无此枚举值）。
 2. **编排层**：操作前校验 `operator` 的 RBAC 权限（层 A，如只有 `hr_admin` 能触发入职）。
 3. **适配层**：REST 适配层只暴露最小必要 Tool，高危操作（如 `delete_account`）不在 `/invoke` 路由中暴露，仅编排层白名单可调。
-4. **审计**：所有 `TaskInstance` 的 `input_params` 和 `output_result` 必须落库，保存 180 天。`operator` 与 `trace_id` **并列贯穿全链**，支持按 `operator` 和 `business_key` 追溯。
+4. **审计**：所有 `process` / `process_step` 的 `input_params` 与 `result` / `output_result` 必须落库(process 表存 `result`,process_step 表存 `output_result`),保存 180 天。`operator` 与 `trace_id` **并列贯穿全链**,支持按 `operator` 和 `business_key` 追溯。
 
 ### 回滚策略
 
