@@ -1,26 +1,20 @@
-"""会议室预订流程编排。
+"""会议室预订流程编排(声明式 Saga:整笔原子 + 失败逆序补偿)。
 
-顺序执行::
+继承 :class:`BaseWorkflow`,只声明三步序列(submit → approve → update-use-status);
+留痕、顺序执行、失败逆序 ``cancel`` 补偿由基类统一驱动。
 
-    Step 1 提交     submit_booking      -> bookingId
-    Step 2 审批     approve_booking     -> (依赖 bookingId)
-    Step 3 更新状态 update_use_status   -> (依赖 bookingId)
+一致性策略:任一步失败即逆序 cancel 已成功步(yudao ``PUT /cancel`` 终态覆盖、幂等),
+整笔原子——失败无副作用残留,故重试从头跑即可(不做断点续跑,断点续跑会去操作已
+cancel 的预订、与 yudao 宽松状态机冲突)。
 """
 from __future__ import annotations
 
 from pydantic import BaseModel, Field
 
-from adapters import AdapterResponse
 from adapters.oa_adapter.oa_client import client
-from infra.logger import setup_logging
-from orchestrator.base import (
-    BaseWorkflow,
-    WorkflowExecutionContext,
-    WorkflowResult,
-)
+from orchestrator.base import BaseWorkflow, WorkflowExecutionContext
+from orchestrator.workflow_engine import WorkflowStep
 from runtime.context import get_operator
-
-logger = setup_logging(__name__)
 
 
 class MeetingRoomBookingInput(BaseModel):
@@ -35,7 +29,7 @@ class MeetingRoomBookingInput(BaseModel):
 
 
 class MeetingRoomBookingWorkflow(BaseWorkflow):
-    """会议室预订流程编排(submit → approve → update-use-status)。"""
+    """会议室预订(submit → approve → update-use-status,失败补偿 cancel)。"""
 
     name: str = "meeting_room_booking"
     description: str = "调用OA系统执行会议室预订:提交→审批→更新使用状态"
@@ -49,86 +43,55 @@ class MeetingRoomBookingWorkflow(BaseWorkflow):
             f"{arguments.meeting_start_time}_{arguments.meeting_end_time}"
         )
 
-    async def execute(
+    def steps(
             self, arguments: MeetingRoomBookingInput, context: WorkflowExecutionContext
-    ) -> WorkflowResult:
-
-        steps: list[dict] = []
-
-        # creator 取自当前 operator(dispatcher 已保证存在),代签头同步透传给下游
+    ) -> list[WorkflowStep]:
+        """声明三步预订序列;任一步失败时,此前已成功步按 compensate 逆序 cancel。"""
+        # creator 取自当前 operator
         creator = get_operator().user_id
+        # submit 步产出 bookingId(其 result.data),经 ctx.results 回取
+        booking_id = lambda ctx: int(ctx.results["submit_booking"].result.data)
 
-        try:
-            # Step 1 提交预订
-            submitted = await client.submit_booking(
-                room_id=arguments.room_id,
-                meeting_title=arguments.meeting_title,
-                meeting_start_time=arguments.meeting_start_time,
-                meeting_end_time=arguments.meeting_end_time,
-                creator=creator,
-                moderator_id=arguments.moderator_id,
-            )
-            steps.append(self._record_step(1, "submit_booking", "提交预订", submitted))
-            if submitted.is_error:
-                return self._failure(steps, submitted)
-            booking_id = submitted.result.get("value")
-
-            # Step 2 审批(依赖 bookingId)
-            approved = await client.approve_booking(booking_id)
-            steps.append(self._record_step(2, "approve_booking", "审批通过", approved))
-            if approved.is_error:
-                return self._failure(steps, approved)
-
-            # Step 3 更新使用状态(依赖 bookingId)
-            updated = await client.update_use_status(booking_id, arguments.use_status)
-            steps.append(self._record_step(3, "update_use_status", "更新使用状态", updated))
-            if updated.is_error:
-                return self._failure(steps, updated)
-        except Exception as exc:
-            logger.exception("会议室预订流程执行异常,已完成 %d 步", len(steps))
-            return WorkflowResult(
-                output=f"会议室预订流程执行异常(已完成 {len(steps)} 步):{exc}",
-                is_error=True,
-                metadata={"completed_steps": len(steps), "steps": steps},
-            )
-
-        logger.info("会议室预订完成: booking_id=%s", booking_id)
-
-        return WorkflowResult(
-            output=(
-                f"会议室预订完成:预订单号 {booking_id},已审批,"
-                f"使用状态已更新为 {arguments.use_status}"
+        return [
+            WorkflowStep(
+                step_no=1,
+                step_key="submit_booking",
+                step_name="提交预订",
+                adapter="oa",
+                action="submit_booking",
+                next=lambda ctx: client.submit_booking(
+                    room_id=arguments.room_id,
+                    meeting_title=arguments.meeting_title,
+                    meeting_start_time=arguments.meeting_start_time,
+                    meeting_end_time=arguments.meeting_end_time,
+                    creator=creator,
+                    moderator_id=arguments.moderator_id,
+                ),
+                compensate=lambda ctx: client.cancel_booking(booking_id(ctx)),
+                input_params={
+                    "roomId": arguments.room_id,
+                    "meetingTitle": arguments.meeting_title,
+                    "meetingStartTime": arguments.meeting_start_time,
+                    "meetingEndTime": arguments.meeting_end_time,
+                    "moderatorId": arguments.moderator_id,
+                },
             ),
-            metadata={
-                "booking_id": booking_id,
-                "use_status": arguments.use_status,
-                "steps": steps,
-            },
-        )
-
-    @staticmethod
-    def _record_step(
-            step_no: int, step_key: str, step_name: str, resp: AdapterResponse
-    ) -> dict:
-        """把单步 :class:`AdapterResponse` 转成步骤记录(字段对齐 ProcessStep)。"""
-        return {
-            "step_no": step_no,
-            "step_key": step_key,
-            "step_name": step_name,
-            "adapter": resp.adapter,
-            "action": resp.action,
-            "status": "success" if not resp.is_error else "failed",
-            "input": resp.request_payload,
-            "output": resp.response_payload,
-            "error_message": resp.error_message,
-            "duration_ms": resp.duration,
-        }
-
-    @staticmethod
-    def _failure(steps: list[dict], resp: AdapterResponse) -> WorkflowResult:
-        """某步外部调用失败:该步已并入 steps(含完整留痕),据此返回错误结果。"""
-        return WorkflowResult(
-            output=f"会议室预订在「{steps[-1]['step_name']}」步骤失败:{resp.error_message}",
-            is_error=True,
-            metadata={"completed_steps": len(steps) - 1, "steps": steps},
-        )
+            WorkflowStep(
+                step_no=2,
+                step_key="approve_booking",
+                step_name="审批通过",
+                adapter="oa",
+                action="approve_booking",
+                next=lambda ctx: client.approve_booking(booking_id(ctx)),
+                compensate=lambda ctx: client.cancel_booking(booking_id(ctx)),
+            ),
+            WorkflowStep(
+                step_no=3,
+                step_key="update_use_status",
+                step_name="更新使用状态",
+                adapter="oa",
+                action="update_use_status",
+                next=lambda ctx: client.update_use_status(booking_id(ctx), arguments.use_status),
+                compensate=lambda ctx: client.cancel_booking(booking_id(ctx)),
+            ),
+        ]

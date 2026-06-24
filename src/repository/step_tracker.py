@@ -1,7 +1,7 @@
 """流程步骤留痕(``process_step`` 表)的读写封装。
 
 职责:把 workflow 每一步的执行过程结构化落库,支撑「全程可追溯」与 Saga 补偿状态机。
-与 :mod:`infra.idempotency`(流程级幂等)同款风格——纯 DB 操作、显式 ``flush``、
+与 :mod:`orchestrator.idempotency`(流程级幂等)同款风格——纯 DB 操作、显式 ``flush``、
 落库失败只记日志不阻断主流程(留痕丢失不应让业务调用失败)。
 
 调用方约定:workflow 在**每步执行前**调 :func:`create_step` 拿到 ``step_id``
@@ -17,7 +17,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from infra.database import db_session
 from infra.logger import setup_logging
-from infra.models import ProcessStep
+from repository.models import ProcessStep
 
 logger = setup_logging(__name__)
 

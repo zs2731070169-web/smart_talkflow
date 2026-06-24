@@ -11,8 +11,8 @@ import unittest
 from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from adapters.base import AdapterRequest, BaseAdapter
-from infra.models import AdapterCallLog
+from adapters.base import AdapterRequest, AdapterResult, BaseAdapter
+from repository.models import AdapterCallLog
 from runtime.context import (
     OperatorContext,
     RequestContext,
@@ -35,8 +35,7 @@ class _FakeAdapter(BaseAdapter):
         return False, response_payload.get("msg")
 
     def extract_result(self, payload):
-        data = payload.get("data")
-        return data if isinstance(data, dict) else {"value": data}
+        return AdapterResult(data=payload.get("data"))
 
 
 def _make_resp(code=0, data=None, status=200):

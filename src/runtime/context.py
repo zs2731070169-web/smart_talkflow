@@ -42,6 +42,8 @@ class RequestContext:
     trace_id: str | None = None
     # 流程实例 id(dispatcher 创建 process 后回填,供 adapter 审计留痕关联)
     process_id: int | None = None
+    # 步骤实例 id(workflow 每步创建 process_step 后回填,供 adapter 审计留痕关联到具体步)
+    step_id: int | None = None
 
 
 # ContextVar:持有当前请求的 RequestContext。
@@ -77,3 +79,19 @@ def get_process_id() -> int | None:
     """读取当前请求关联的流程实例 id,可能为 ``None``(非流程上下文内)。"""
     ctx = _request_context.get()
     return ctx.process_id if ctx else None
+
+
+def set_step_id(step_id: int | None) -> None:
+    """回填当前执行步骤的 id(workflow 每步创建 process_step 后调用)。
+
+    每步执行前 set、结束后置 ``None``,使该步内的 adapter 审计留痕精确关联到当前步。
+    """
+    ctx = _request_context.get()
+    if ctx is not None:
+        ctx.step_id = step_id
+
+
+def get_step_id() -> int | None:
+    """读取当前执行步骤的 id,可能为 ``None``(非步骤上下文或步间已清空)。"""
+    ctx = _request_context.get()
+    return ctx.step_id if ctx else None

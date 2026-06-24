@@ -24,7 +24,7 @@ class LlmClientTest(unittest.IsolatedAsyncioTestCase):
     """OpenAI / Anthropic 两个客户端的流式调用冒烟测试。"""
 
     async def test_openai(self):
-        """OpenAI 兼容协议:tools 采用 function 包装格式。"""
+        """OpenAI 兼容协议:workflow 采用 function 包装格式。"""
         print("\n--- OpenAI ---", flush=True)
         client = OpenAIClient(
             api_key=settings.llm_api_key,
@@ -63,7 +63,7 @@ class LlmClientTest(unittest.IsolatedAsyncioTestCase):
                         print(f"工具调用: {block.name}({block.input})")
 
     async def test_anthropic(self):
-        """Anthropic 兼容协议:tools 采用 input_schema 格式。"""
+        """Anthropic 兼容协议:workflow 采用 input_schema 格式。"""
         print("\n--- Anthropic ---", flush=True)
         anthropic_client = AnthropicApiClient(
             api_key=settings.llm_api_key,

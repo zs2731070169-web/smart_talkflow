@@ -1,21 +1,33 @@
+"""工作流抽象与注册器。
+
+步骤执行引擎(``StepContext`` / ``WorkflowStep`` / ``DoneStep`` / ``StepMeta`` /
+:func:`run_steps`)见 :mod:`orchestrator.workflow_engine`;:meth:`BaseWorkflow.execute`
+委托它驱动顺序执行 + 留痕 + 失败逆序补偿。本模块只定义「workflow 是什么」
+(抽象基类 + 注册器 + 上下文 / 结果 DTO)。
+"""
+from __future__ import annotations
+
 from abc import ABC, abstractmethod
 from dataclasses import field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel
 
-from permission.permission import workflow_role_checker
-from runtime.context import OperatorContext
+from runtime.context import get_process_id
+
+if TYPE_CHECKING:
+    from orchestrator.workflow_engine import WorkflowStep
+    from orchestrator.workflow_engine import run_steps
 
 
 class WorkflowExecutionContext(BaseModel):
-    """执行工具时使用的上下文."""
+    """执行工具时使用的上下文"""
 
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
 class WorkflowResult(BaseModel):
-    """工作流执行结果."""
+    """工作流执行结果"""
 
     output: str
     is_error: bool = False
@@ -23,32 +35,30 @@ class WorkflowResult(BaseModel):
 
 
 class BaseWorkflow(ABC):
-    """工作流基类."""
+    """工作流基类(步骤式编排):子类声明 steps,execute 委托 workflow_engine 驱动。"""
 
     name: str
     description: str
     input_model: type[BaseModel]
 
-    async def is_allowed(self, operator: OperatorContext) -> bool:
-        """层 A:operator 是否有权触发本流程(角色准入查 DB + redis 缓存)。
+    @abstractmethod
+    def steps(self, arguments: BaseModel, context: WorkflowExecutionContext) -> list[WorkflowStep]:
+        """声明工作流的步骤序列(按 step_no 顺序执行)
 
-        运维改配置后调 ``workflow_role_checker.invalidate`` 立即生效,
-        或等 ``settings.workflow_role_cache_ttl`` 过期。
-
-        :param operator: 当前请求操作人
+        :param arguments: 业务参数
+        :param context: 外部传入的执行上下文
         """
-        roles = await workflow_role_checker.get_allowed_roles(self.name)
-        if not roles:
-            return True
-        return bool(set(operator.roles) & roles)
 
     @abstractmethod
     def business_key(self, arguments: BaseModel) -> str | None:
         """从入参提取业务唯一键(供流程级幂等校验使用)。"""
 
-    @abstractmethod
-    async def execute(self, arguments: BaseModel, context: WorkflowExecutionContext) -> WorkflowResult:
-        """执行工作流接口."""
+    async def execute(
+            self, arguments: BaseModel, context: WorkflowExecutionContext
+    ) -> WorkflowResult:
+        """通用驱动:委托 workflow_engine 顺序执行声明的步骤,失败逆序补偿"""
+        from orchestrator.workflow_engine import run_steps
+        return await run_steps(get_process_id(), self.steps(arguments, context))
 
     def to_api_schema(self) -> dict[str, Any]:
         """将工作流定义结构序列化为API格式."""

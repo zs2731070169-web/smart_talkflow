@@ -16,7 +16,7 @@
 用法::
 
     from infra.database import db_session
-    from infra.models import Process
+    from repository.models import Process
 
     async with db_session() as session:
         session.add(Process(process_key="onboarding", ...))

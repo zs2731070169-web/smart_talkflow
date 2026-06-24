@@ -1,4 +1,4 @@
-"""infra.idempotency 流程级幂等校验测试。
+"""orchestrator.idempotency 流程级幂等校验测试。
 
 测试分两层,对应被测代码的两类逻辑:
 
@@ -33,13 +33,13 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 import infra.database as _db
 from infra.database import db_session
-from infra.idempotency import (
+from orchestrator.idempotency import (
     Action,
     IdempotencyChecker,
     IdempotencyCheckRequest,
     build_idempotency_key,
 )
-from infra.models import Process
+from repository.models import Process
 
 # 与实现一致的最大幂等键长度
 _MAX_KEY_LEN = 160

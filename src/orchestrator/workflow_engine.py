@@ -13,7 +13,7 @@ from pydantic import BaseModel
 from adapters import AdapterResponse
 from infra.logger import setup_logging
 from orchestrator.base import WorkflowResult
-from orchestrator.step_recorder import (
+from repository.step_tracker import (
     CompensationStatus,
     StepStatus,
     create_step,

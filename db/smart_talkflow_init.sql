@@ -1,6 +1,6 @@
 -- ============================================================================
 -- smart_talkflow 第一阶段(MVP)数据库初始化脚本
--- 对应文档:传统业务系统接入 Agent 落地计划.md —— 第一阶段:同步单流程跑通
+-- 对应文档:传统业务系统接入 Agent 落地计划 v1.0.md —— 第一阶段:同步单流程跑通
 -- ----------------------------------------------------------------------------
 -- 【设计原则】
 --   本平台是「对接各种传统业务系统的通用 Agent 编排平台」,业务无关。
@@ -126,7 +126,7 @@ CREATE TABLE process_step (
     external_ref         VARCHAR(128) NULL COMMENT '外部业务系统返回的引用(泛型:如 emp_id / account / mailbox,用于后续步骤引用与追溯)',
     error_message        TEXT         NULL COMMENT '失败原因',
     duration_ms          INT UNSIGNED NULL COMMENT '执行耗时(毫秒,埋坑点3:同步阻塞监控依据)',
-    compensation_status  VARCHAR(32)  NOT NULL DEFAULT 'none' COMMENT '补偿状态:none=无需补偿 / pending=待补偿 / done=已补偿 / failed=补偿失败(为阶段4 Saga 预留,本阶段恒为 none)',
+    compensation_status  VARCHAR(32)  NOT NULL DEFAULT 'none' COMMENT '补偿状态:none=未补偿 / done=已补偿 / failed=补偿失败',
     started_at           DATETIME     NULL COMMENT '步骤开始时间',
     finished_at          DATETIME     NULL COMMENT '步骤结束时间',
     created_at           DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',

@@ -50,5 +50,9 @@ class OAClient:
         """Step 3 更新使用状态(0待使用/1使用中/2已完成/3已取消)。"""
         return await self.meeting_room.update_use_status(booking_id, use_status)
 
+    async def cancel_booking(self, booking_id: int) -> AdapterResponse:
+        """补偿:取消会议室预订(submit/approve/update 后皆可用以回退)。"""
+        return await self.meeting_room.cancel_booking(booking_id)
+
 
 client = OAClient()

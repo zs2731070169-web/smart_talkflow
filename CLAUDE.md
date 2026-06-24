@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 `smart_talkflow` 是**业务无关的 Agent 编排平台**:把用户的一句自然语言,翻译成对已有传统业务系统(OA/ERP/CRM)的确定工作流调用,并在每一步留下可追溯的执行痕迹。平台**绝不复制业务数据**——员工/部门/邮箱等主数据归各传统系统所有,平台只负责「编排、执行、审计」。
 
-设计上的贯穿示例是**员工入职**:LLM 解析意图+参数 → 按 姓名+部门 回查 HR 主数据补全业务唯一键(身份证号)→ 幂等校验 → 顺序执行 建档→开户→授权→邮箱 → 每步输入/输出/外部 HTTP 调用全部落库。**但当前代码里实际注册的示例流程是「会议室预订」**(`MeetingRoomBookingWorkflow`:提交→审批→更新使用状态),入职仅是 SSD 设计蓝本。项目按四阶段演进,**当前处于阶段一(MVP)**。完整设计见 `SSD/`。
+设计上的贯穿示例是**员工入职**:LLM 解析意图+参数 → 按 姓名+部门 回查 HR 主数据补全业务唯一键(身份证号)→ 幂等校验 → 顺序执行 建档→开户→授权→邮箱 → 每步输入/输出/外部 HTTP 调用全部落库。**但当前代码里实际注册的示例流程是「会议室预订」**(`MeetingRoomBookingWorkflow`:提交→审批→更新使用状态),入职仅是 SSD 设计蓝本。项目按四阶段演进,**当前处于阶段一(MVP)**。完整设计见 `SSD/`(总纲 `传统业务系统接入 Agent 落地计划 v2.0.md`(现行;v1.0 已作废,放弃 YAML 引擎方案,全程编码层) + `用户认证与操作权限控制落地计划.md` + `流程崩溃自动恢复落地计划.md`——心跳存活检测与崩溃自动重跑,**设计阶段、代码未实现**)。
 
 ## 运行环境与命令(关键)
 
@@ -59,12 +59,13 @@ PYTHONPATH=src python -m unittest tests.test_idempotency.IdempotencyCheckerTest.
 | LLM 引擎 | `engine/` | ✅ | 厂商无关的 LLM 抽象层(parser 仍为骨架) |
 | 认证 | `security/` | ✅ | SSO JWT(RS256)验签:JWKS 公钥拉取 + redis 缓存 |
 | API | `api/` | ✅ | `/chat` 路由(SSE 流式)+ 认证依赖 + 请求 DTO |
-| 编排 | `orchestrator/` | ✅ | workflow 注册 + 调度执行(认证→权限→校验→幂等→执行→状态机) |
+| 编排 | `orchestrator/` | ✅ | workflow 抽象(`base`)+ 步骤执行引擎(`workflow_engine`)+ 调度入口(`dispatcher`)+ 具体 workflow(`workflow/`) |
 | 运行时 | `runtime/` | ✅ | 请求级上下文 + 启动装配工厂 + SSE 序列化 |
 | 适配器 | `adapters/` | ✅(oa) | 封装传统系统 HTTP 调用(错误码归一 + 留痕);oa 已实现,crm/ecs/erp 骨架 |
 | 服务 | `services/` | ✅(credential) | 代签凭证、邮箱、记忆等;`email`/`memory` 骨架 |
-| 权限 | `permission/` | ✅ | 层 A RBAC:`WorkflowRoleChecker` 查 `workflow_role` 表 + redis 缓存 |
-| 基础设施 | `infra/` | ✅ | DB/HTTP/日志/异常/幂等/Redis 全部完成 |
+| 权限 | `permission/` | ✅ | 层 A RBAC:`WorkflowRoleChecker` 查 `workflow_role` 表 + redis 缓存 + `is_allowed` 判定(已从 BaseWorkflow 下沉到此) |
+| 数据访问 | `repository/` | ✅ | ORM 模型(models)+ `process_tracker`(process 表 CRUD/状态转换)+ `step_tracker`(process_step 落库) |
+| 基础设施 | `infra/` | ✅ | DB/HTTP/日志/异常/Redis(纯技术设施,无业务/数据模型) |
 | 编排解析 | `engine/parser.py` | 🚧 | `IntentParser.run()` **仍为骨架(只有签名)** |
 | 身份补全 | `orchestrator/resolver.py` | 🚧 | 空(查 HR 主数据、重名反问,未实现) |
 
@@ -93,20 +94,22 @@ PYTHONPATH=src python -m unittest tests.test_idempotency.IdempotencyCheckerTest.
 
 ### 编排层(`orchestrator/`)
 
-- `base.py`:`BaseWorkflow`(抽象基类:`name`/`description`/`input_model`/`business_key()`/`execute()`/`to_api_schema()`/`is_allowed()`)+ `WorkflowRegistry`(按 name 注册、查询、`to_api_schema()` 暴露给 LLM 作 tools)+ `WorkflowExecutionContext`/`WorkflowResult`。**`is_allowed()` 是 `async`**:从 `workflow_role` 表(经 `permission.workflow_role_checker`,DB + redis 缓存)查本流程允许角色,**空集=全员可用,非空比对 `operator.roles`**——角色策略**配置化**(不硬编码在 workflow 类,运维改表 + `invalidate` 即生效)。**注意:`base.py` 在 `orchestrator/` 下,不在 `workflow/` 下。**
-- `dispatcher.py`:`WorkflowDispatcher.dispatch(name, arguments, context, max_retry)`——完整调度链,见下「调度链」。
-- `workflow/meeting_room.py`:当前唯一注册的 `MeetingRoomBookingWorkflow`,顺序执行 submit→approve→update_use_status,业务唯一键 = `operator + roomId + 起止时间`。
+- `base.py`:工作流**抽象层**(纯编排契约,不含执行/权限)——`BaseWorkflow`(步骤式基类:声明 `steps(arguments, context)` + `business_key()`,`execute()` 委托 `workflow_engine.run_steps`)+ `WorkflowRegistry`(按 name 注册/查询/`to_api_schema()` 暴露给 LLM)+ `WorkflowExecutionContext`/`WorkflowResult`。**`execute` 在基类,子类只声明 `steps`**;**`is_allowed` 不在此**(已下沉 `permission`)。`base ↔ workflow_engine` 有循环依赖,靠 `execute` 内延迟 import `run_steps` + `TYPE_CHECKING` 引用 `WorkflowStep` 规避。
+- `workflow_engine.py`:**步骤执行引擎**(从 base 抽出,职责单一)——`StepContext`/`WorkflowStep`/`DoneStep`/`StepMeta` + `_exec_step`/`_compensate`/`run_steps(process_id, steps)`。`run_steps` 顺序执行声明步骤,每步建 `process_step`(running 占位)→ `set_step_id` → forward → 落结果;任一步失败按各步声明的 `compensate` 逆序补偿(per-step 可选,`compensate=None` 不补偿)。**forward 异常归一为 `is_error` resp(execute/run_steps 不抛)**;forward/compensate 的 except 缩到 `(KeyError, ValueError, TypeError)`。bookingId 经 `ctx.results["submit_booking"].result.data` 流转(无 `external_ref_key`)。
+- `dispatcher.py`:`WorkflowDispatcher.dispatch(name, arguments, context, max_retry)` 调度入口(见下「调度链」);`_check_idempotency`/`_finalize` 为**模块级函数**,dispatch 只编排。
+- `idempotency.py`:流程级幂等**逻辑**(`IdempotencyChecker` + 状态机判定 NEW/COMPLETED/FAILED/REJECT/running);**不直接碰 DB**,`process` 表访问下沉到 `repository/process_tracker.py`(`acquire_or_create`/`transition_status`)。
+- `workflow/meeting_room.py`:当前唯一注册的 `MeetingRoomBookingWorkflow`,**声明式**三步(submit→approve→update,每步带 `compensate`=cancel),业务唯一键 = `operator + roomId + 起止时间`。继承 `BaseWorkflow`,只实现 `steps()` + `business_key()`。
 - `resolver.py`:空。设计上负责身份补全(查 HR 主数据、重名反问)。
 
 ### 运行时(`runtime/`)
 
-- `context.py`:`OperatorContext`(user_id/roles/tenant_id/name)+ `RequestContext`(operator + trace_id + process_id)+ `ContextVar`。深层组件(adapter/dispatcher)用 `get_operator()` 取当前请求操作人、`get_process_id()` 取当前流程实例 id(**无需层层透传**);`process_id` 由 dispatcher 在幂等创建 process 后 `set_process_id()` 回填,供 adapter 落 `adapter_call_logs` 关联。
+- `context.py`:`OperatorContext`(user_id/roles/tenant_id/name)+ `RequestContext`(operator + trace_id + process_id + **step_id**)+ `ContextVar`。深层组件用 `get_operator()`/`get_process_id()`/`get_step_id()` 取当前操作人/流程/步骤(**无需层层透传**);`process_id` 由 dispatcher 幂等创建后回填,`step_id` 由 workflow_engine 每步(`create_step`)后 `set_step_id()` 回填,供 adapter 落 `adapter_call_logs.step_execution_id` 关联到步。
 - `runner.py`:`build_runtime()`(**启动装配工厂**,lifespan 调一次:组装 `WorkflowRegistry`+注册 workflow+`WorkflowDispatcher`+`IntentParser`)与 `Runtime.run()`(**每请求轻量执行**,见下「启动装配 vs 每请求执行」)。
 
 ### 适配器(`adapters/`)
 
-- `base.py`:`BaseAdapter`(adapter_name/target_system/base_url/credential_provider)+ `AdapterRequest`(action/method/path/payload/params)+ `AdapterResponse`(结构化留痕,字段对齐 `AdapterCallLog` 表)。统一入口 `_call_action`:代签取头 → `infra.http.request` → `is_success()` 判定 → `extract_result()` 提取业务结果 → HTTP 状态码归一为业务异常 → **落 `AdapterCallLog`**(每次调用一条,带 operator/tenant/credential/trace/process 关联;落库失败 `except SQLAlchemyError` 只记日志、不阻断主流程)→ 构造留痕返回。
-- `oa_adapter/`:`oa_client.py`(模块级单例 `client = OAClient()`,聚合会议室域)+ `oa_meeting_room.py`(会议室预订 adapter)。
+- `base.py`:`BaseAdapter`(adapter_name/target_system/base_url/credential_provider)+ `AdapterRequest`(action/method/path/payload/params)+ **`AdapterResult`(结构化业务结果,`data: Any`)** + `AdapterResponse`(结构化留痕,`result: AdapterResult`,字段对齐 `AdapterCallLog` 表)。统一入口 `_call_action`:代签取头 → `infra.http.request` → `is_success()` 判定 → `extract_result(payload) -> AdapterResult`(子类实现)→ HTTP 状态码归一 → **落 `AdapterCallLog`**(每次一条,**`step_execution_id` 从 `get_step_id()` 取**,关联当前执行步;落库失败 `except SQLAlchemyError` 只记日志)→ 构造留痕返回。**业务/网络异常归一为 `is_error` resp,不向上抛**。
+- `oa_adapter/`:`oa_client.py`(模块级单例 `client`,聚合会议室域)+ `oa_meeting_room.py`(会议室预订 adapter:`submit_booking`/`approve_booking`/`update_use_status`/`cancel_booking`;`cancel` 作 Saga 补偿动作——yudao `PUT /cancel` 终态覆盖、幂等)。
 - `crm_adapter/` / `ecs_adapter/` / `erp_adapter/`:各一个 `*_client.py` 骨架。
 
 ### 服务(`services/`)
@@ -115,7 +118,13 @@ PYTHONPATH=src python -m unittest tests.test_idempotency.IdempotencyCheckerTest.
 
 ### 基础设施(`infra/`)
 
-`database.py`(异步引擎+会话)、`models.py`(5 张业务无关 ORM 模型)、`http.py`(httpx 封装+trace_id 注入)、`logger.py`(分级日志)、`exceptions.py`(`ApiException` + 11 个状态码子类,400/401/403/404/409/422/429/500/502/503/504)、`idempotency.py`(流程级幂等,见下)、`redis_client.py`(进程级单例)。全部已实现。
+`database.py`(异步引擎+会话)、`http.py`(httpx 封装+trace_id 注入)、`logger.py`(分级日志)、`exceptions.py`(`ApiException` + 11 个状态码子类,400/401/403/404/409/422/429/500/502/503/504)、`redis_client.py`(进程级单例)。**纯技术设施,无业务/数据模型**(ORM 与表访问在 `repository/`,幂等逻辑在 `orchestrator/idempotency.py`)。
+
+### 数据访问(`repository/`)
+
+- `models.py`:5 张业务无关 ORM 模型(`request_logs`/`process`/`process_step`/`adapter_call_logs`/`audit_logs`)+ `workflow_role`(RBAC)。
+- `process_tracker.py`:`process` 表数据访问(`acquire_or_create` 占位 + 状态转换 `transition_status` + `increment_attempt`);幂等逻辑(`orchestrator/idempotency.py`)的 DB 操作下沉到这。
+- `step_tracker.py`:`process_step` 表落库(`create_step`/`finish_step`/`update_compensation` + `StepStatus`/`CompensationStatus` 枚举);被 `workflow_engine` 调用。
 
 ## 需要读多文件才能理解的设计
 
@@ -128,10 +137,10 @@ PYTHONPATH=src python -m unittest tests.test_idempotency.IdempotencyCheckerTest.
 ### 3. 数据库会话约定(`infra/database.py`)
 用 `async with db_session() as session:` —— 正常退出自动 `commit`,异常 `rollback` 并重抛。引擎设了 `expire_on_commit=False`(异步下 commit 后对象不过期,可直接访问)和 `autoflush=False`(**写库必须手动 `await session.flush()`**)。关系属性惰性加载,异步会话访问前需 `selectinload`/`joinedload` 预加载,否则隐式 IO 报错。
 
-### 4. 业务无关泛型 + 逻辑关联无物理外键(`infra/models.py`)
+### 4. 业务无关泛型 + 逻辑关联无物理外键(`repository/models.py`)
 5 张表(`request_logs`/`process`/`process_step`/`adapter_call_logs`/`audit_logs`)全部业务无关:`process_key`/`business_key`/`adapter`/`action` 都是运行时赋值的泛型字符串。表间关联**故意不加物理外键**(日志表需独立于业务记录存活,满足审计不可篡改),ORM 用 `relationship(primaryjoin="foreign(...) == ...")` 在无 FK 前提下建立导航。`audit_logs` 用 `resource_type`+`resource_id` 多态指向任意资源。
 
-### 5. 幂等:业务唯一键 + 状态机 + 重试计数(`infra/idempotency.py` + `orchestrator/dispatcher.py`)
+### 5. 幂等:业务唯一键 + 状态机 + 重试计数(`orchestrator/idempotency.py` + `repository/process_tracker.py`)
 幂等键不能用 `name`(会重名),必须用业务唯一键;但用户输入通常不含它,故执行前要先回查主数据补全(`resolver`,暂未实现),再以补全后的键做幂等。数据库用 `UNIQUE(process_key, business_key)`(对应 `process.idempotency_key`,键约定 `{process_key}_{business_key}`)兜底。
 
 幂等判定是一个**状态机**:`IdempotencyChecker.check()` 先查 `process` 表(先查后插,并发命中 `IntegrityError` 则回查),按命中记录的 `status` 返回 `Action` 信号:
@@ -141,7 +150,7 @@ PYTHONPATH=src python -m unittest tests.test_idempotency.IdempotencyCheckerTest.
 - `FAILED`:`context.attempt` 累加重试计数;超 `max_retry` 则 `_transition_status` 转 `reject` 永久拒绝,否则允许重跑。
 - `REJECT` / `running` / 其它非终态:拒绝执行。
 
-执行后由 dispatcher 按 `result.is_error` 调 `checker.completed()` / `failed()` 更新状态。状态转换受 `_FROM_*` 集合约束,避免跨态跳跃。
+执行后由 dispatcher 的 `_finalize`(模块级函数)按 `result.is_error` 调 `checker.completed()` / `failed()` 更新状态。状态转换受 `_FROM_*` 集合约束,避免跨态跳跃。
 
 ### 6. 代签凭证:服务账号 + operator HMAC(`services/credential.py` + `adapters/base.py`)
 平台对下游业务系统的调用用**服务账号**做技术认证(`X-API-Key`),同时把**真实操作人**经 HMAC 签名「代签」给下游(`_build_agent_headers`):头含 `X-Operator-Userid` + `tenant-id` + `X-Agent-Signature`(HMAC-SHA256 over `userId|tenant|nonce|timestamp`)+ `X-Agent-Timestamp`/`X-Agent-Nonce`。下游 `AgentDelegationFilter`(**yudao 已实现**,注册在全局链、**先于** `TokenAuthenticationFilter`)按 `X-API-Key` 识别,校验 **api-key SHA-256 哈希比对(防配置泄露 + 恒定时间)、时间戳 ±5min 窗口、nonce Redis 去重(防重放)、HMAC 恒定比对**;通过后把当前用户改写为真实操作人,使 `@PreAuthorize` 按真实权限判定、审计归属真实用户。**密钥两把、分离**:`api-key`(服务账号身份,yudao 存哈希)与 `delegation-secret`(HMAC 密钥,yudao 明文存用于重算)是**不同值**,分别生成/管理/轮换。`utils/api_key_util.py` 生成 api-key + 哈希(`PYTHONPATH=src python -m utils.api_key_util`)。`CredentialProvider` Protocol 保证「同一 provider、不同 operator → 不同凭证」;`default_credential_provider(target_system)` 按 target_system 取 `settings.oa_api_key`/`oa_delegation_secret` 装配 `DefaultCredentialProvider`。
@@ -152,37 +161,41 @@ PYTHONPATH=src python -m unittest tests.test_idempotency.IdempotencyCheckerTest.
 **每请求轻量执行**:`POST /chat` → `Depends(get_current_operator)` 认证 → 取 `app.state.runtime` → `Runtime.run(operator, user_input)`:`new_trace_id()` + 建 `RequestContext` + 构造 user 消息 → `IntentParser.run()` 产出 `StreamEvent` → 序列化为 SSE `data:` JSON 行(`text`/`tool_started`/`tool_completed`/`unknown`)→ `StreamingResponse` 直出。**SSE 序列化归 runtime,router 不在请求内重新装配。**
 
 ### 8. 调度链与角色权限(`orchestrator/dispatcher.py`)
-`WorkflowDispatcher.dispatch()` 顺序:① 认证(operator 缺失即拒)→ ② 查 workflow → ③ **权限网关**(`await workflow.is_allowed(operator)`:查 `workflow_role` 表允许角色,空集=全员可用,非空比对 `operator.roles`)→ ④ Pydantic 参数校验 → ⑤ 幂等校验(见上,命中后 `set_process_id(process.id)` 回填 `RequestContext` 供 adapter 落库关联)→ ⑥ `workflow.execute()` → ⑦ 按结果更新 process 状态。任一步失败都返回带 `is_error=True` 的 `WorkflowResult` 而非抛异常(除非执行体本身抛异常),便于上层流式反馈。
+`WorkflowDispatcher.dispatch()` 顺序:① 认证(operator 缺失即拒)→ ② 查 workflow → ③ **权限网关**(`await workflow_role_checker.is_allowed(workflow.name, operator)`——**权限判定在 permission 层**,已从 BaseWorkflow 下沉;查 `workflow_role` 表允许角色,空集=全员可用,非空比对 `operator.roles`)→ ④ Pydantic 参数校验 → ⑤ 幂等校验(`_check_idempotency` 模块级,命中终态短路;命中后 `set_process_id(process.id)` 回填 `RequestContext` 供 adapter 落库关联)→ ⑥ `workflow.execute()`(委托 `workflow_engine.run_steps`,forward 异常已归一为 is_error,**execute 不抛**)→ ⑦ `_finalize` 按结果更新 process 状态(completed/failed)。dispatch 串联各环节、每步委托专门组件,自身只编排。
 
 ### 9. 适配器错误码归一(`adapters/base.py`)
-`BaseAdapter._call_action()` 把下游真实 HTTP 状态码经 `_STATUS_EXCEPTIONS` 映射为对应 `ApiException` 子类(400→`BadRequestException` … 504→`GatewayTimeoutException`,未列出的统一 500),但**不向上抛**——捕获后转为 `AdapterResponse(is_error=True)` 返回,保证一次调用必有一条结构化留痕(`AdapterResponse` 字段与 `adapter_call_logs` 表对齐,可直接落库)。网络层异常(httpx)统一记为 503。`is_success()`/`extract_result()` 是子类必须实现的两个抽象方法(各业务系统成功判定与结果结构不同)。
+`BaseAdapter._call_action()` 把下游真实 HTTP 状态码经 `_STATUS_EXCEPTIONS` 映射为对应 `ApiException` 子类(400→`BadRequestException` … 504→`GatewayTimeoutException`,未列出的统一 500),但**不向上抛**——捕获后转为 `AdapterResponse(is_error=True)` 返回,保证一次调用必有一条结构化留痕(`AdapterResponse` 字段与 `adapter_call_logs` 表对齐,可直接落库)。网络层异常(httpx)统一记为 503。`is_success()`/`extract_result(payload) -> AdapterResult` 是子类必须实现的两个抽象方法(各业务系统成功判定与结果提取不同);`AdapterResponse.result` 持 `AdapterResult(data)` 结构化对象(非裸 dict)。
 
 ## 当前进度与缺口(改动前必读)
 
 - **层 A RBAC 已配置化**:`workflow_role` 表 + `permission.WorkflowRoleChecker`(DB + redis 缓存),`is_allowed` 异步查表,角色策略运维可改、无需重启(`invalidate` 立即生效或等 TTL)。
 - **审计落库已闭环**:adapter 每次 HTTP 调用落 `AdapterCallLog`(operator/tenant/credential/trace/process 关联),可「凭一个 operator_id 串联该用户所有下游调用」。
 - **代签安全已增强**:yudao `AgentDelegationFilter` 用 api-key **哈希比对**(防配置泄露)+ **nonce Redis 去重**(防重放)+ **恒定时间比对**(防时序)。**不走 OAuth2/token 刷新**(实测 yudao `client_credentials` 的 token 绑 `userId=0` 无业务权限)。
-- **端到端尚未真正跑通**:`/chat` → 认证 → `Runtime.run` 链路已搭好,但 `IntentParser.run()` **只有签名、不产出任何 `StreamEvent`**——`runtime.run` 迭代它实际拿不到事件。这是当前主线缺口。
-- **`WorkflowDispatcher` 完整但未接入主链路**:`dispatcher` 已实现完整调度+幂等+状态机,但 `IntentParser` 还没产出 workflow 调用决策交给它(`runner.run` 的 docstring 标注「后续」才接 dispatcher)。给 dispatcher 补单测是安全的(已有 `tests/test_idempotency.py`)。
-- **会议室预订是唯一真实流程**:`MeetingRoomBookingWorkflow.execute()` 调 `adapters.oa_adapter.oa_client.client`,依赖下游 OA(yudao 风格)真实可达 + `.env` 配好 OA 凭证。
+- **`process_step` 留痕已闭环**:`workflow_engine.run_steps` 每步经 `repository.step_tracker` 落 `process_step`(running→completed/failed + `compensation_status`),`StepMeta` 透出到 `WorkflowResult.metadata["steps"]`;adapter_call_logs 经 `step_id` 关联到步。
+- **Saga 补偿已落地**:会议室三步都声明 `compensate`(cancel),任一步失败逆序 cancel 已成功步(整笔原子);补偿 per-step 可选,未声明的步不补偿。详见 `SSD/流程崩溃自动恢复落地计划.md`(心跳检测 + 崩溃自动重跑,**设计阶段、代码未实现**)。
+- **bookingId 流转**:经 `ctx.results["submit_booking"].result.data`(去掉了 `external_ref_key`,`AdapterResult.data` 原样)。
+- **端到端尚未真正跑通**:`/chat` → 认证 → `Runtime.run` 链路已搭好,但 `IntentParser.run()` **只有签名、不产出任何 `StreamEvent`**——这是当前主线缺口。
+- **`WorkflowDispatcher` 完整但未接入主链路**:`dispatcher` 已实现完整调度+幂等+状态机,但 `IntentParser` 还没产出 workflow 调用决策交给它。
+- **会议室预订是唯一真实流程**:`MeetingRoomBookingWorkflow` 调 `adapters.oa_adapter.oa_client.client`,依赖下游 OA(yudao 风格)真实可达 + `.env` 配好 OA 凭证。
 - **`resolver.py`(身份补全)、`services/email.py`/`memory.py`、crm/ecs/erp adapter 均为空骨架。**
+- **崩溃恢复未实现**:process 崩溃卡 `running` 会锁死幂等;心跳 + 自动重跑方案见 `SSD/流程崩溃自动恢复落地计划.md`(设计文档,代码未写)。
 
 ## 测试(`tests/`)
 
 - 用标准库 **`unittest`**(非 pytest),异步用例继承 `unittest.IsolatedAsyncioTestCase`。
 - 从项目根运行:`PYTHONPATH=src python -m unittest discover -s tests`。
 - ⚠️ `tests/test_llm_client.py` 是**真实 LLM 冒烟测试**——会真正发起 OpenAI/Anthropic API 调用,消耗 token、依赖 `.env` 配好的可用 key 与网络。
-- 纯本地测试:`test_config`/`test_database`/`test_http`/`test_logger`/`test_system_prompt`/`test_idempotency`(幂等状态机)/`test_deps`(认证依赖 + `is_allowed` 异步 mock)/`test_sso`(JWKS 验签)/`test_audit_logging`(adapter 落 `AdapterCallLog`)。
+- 纯本地测试:`test_config`/`test_database`/`test_http`/`test_logger`/`test_system_prompt`/`test_idempotency`(幂等状态机)/`test_deps`(认证依赖 + `WorkflowRoleChecker.is_allowed`)/`test_sso`(JWKS 验签)/`test_audit_logging`(adapter 落 `AdapterCallLog`)/`test_step_recorder`(`process_step` CRUD)/`test_meeting_room_workflow`(声明式 Saga:全成功/失败逆序补偿/补偿失败标记)。
 
 ## 数据库
 
-`docker-compose.yml` 起 **MySQL 8 + Redis 7** 两个服务,把 `db/` 只读挂载到 `/docker-entrypoint-initdb.d/`。**MySQL 官方镜像仅在数据卷为空时执行该目录脚本**,所以改了 `db/smart_talkflow_init.sql` 后必须 `docker compose down -v` 清卷再 `up`,否则建表不重新执行(本轮新增 `workflow_role` 表,务必清卷重建)。`db/schema_diagram.md` 有 ER 图与落库流说明。容器强制 `utf8mb4_unicode_ci`,与建表脚本对齐,避免 JOIN 时 `Illegal mix of collations`(错误码 1267)。`adapter_call_logs` 含 `operator_id`/`tenant_id`/`credential_source` 列,对应代签留痕;`workflow_role`(`workflow_name`/`role`,UNIQUE)承载层 A RBAC 配置,`process_step` 记录步骤(断点恢复尚未接入,见下)。
+`docker-compose.yml` 起 **MySQL 8 + Redis 7** 两个服务,把 `db/` 只读挂载到 `/docker-entrypoint-initdb.d/`。**MySQL 官方镜像仅在数据卷为空时执行该目录脚本**,所以改了 `db/smart_talkflow_init.sql` 后必须 `docker compose down -v` 清卷再 `up`,否则建表不重新执行(本轮新增 `workflow_role` 表,务必清卷重建)。`db/schema_diagram.md` 有 ER 图与落库流说明。容器强制 `utf8mb4_unicode_ci`,与建表脚本对齐,避免 JOIN 时 `Illegal mix of collations`(错误码 1267)。`adapter_call_logs` 含 `operator_id`/`tenant_id`/`credential_source`/`step_execution_id` 列(对应代签留痕 + 步骤关联);`workflow_role`(`workflow_name`/`role`,UNIQUE)承载层 A RBAC 配置;`process_step` 已由 `workflow_engine` 落库(每步 running→completed/failed + `compensation_status`),**崩溃自动恢复**(心跳 + 重跑)见 `SSD/流程崩溃自动恢复落地计划.md`(设计阶段,代码未实现)。
 
 ## 与 README 的差异(务必留意)
 
 `README.md` 描述的是**计划结构/早期结构**,与当前代码多处不符,改代码以实际目录为准:
 
-- README 写 `orchestrator/actions/`,实际已重构为 `orchestrator/workflow/`(仅 `meeting_room.py`)+ `orchestrator/base.py`(基类与注册器在 `orchestrator/` 下)。
+- README 写 `orchestrator/actions/`,实际已重构为 `orchestrator/` 下:`base.py`(抽象+注册)+ `workflow_engine.py`(步骤执行引擎)+ `dispatcher.py`(调度)+ `workflow/meeting_room.py`(具体流程)。
 - README 入口写根 `main.py`,实际入口是 `src/main.py`(根 `main.py` 已删);运行需 `PYTHONPATH=src uv run uvicorn main:app`。
 - README 仍以「员工入职」为主线示例,实际注册的是「会议室预订」。
 - README 的 `cd src` 运行方式 import 可用,但跑测试仍需从项目根(见「运行环境」)。

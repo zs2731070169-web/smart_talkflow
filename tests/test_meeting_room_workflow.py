@@ -12,7 +12,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from adapters.base import AdapterResponse, AdapterResult
 from orchestrator.base import WorkflowExecutionContext
-from orchestrator.step_recorder import CompensationStatus
+from repository.step_tracker import CompensationStatus
 from orchestrator.workflow.meeting_room import (
     MeetingRoomBookingInput,
     MeetingRoomBookingWorkflow,
@@ -51,9 +51,9 @@ class MeetingRoomWorkflowTest(unittest.IsolatedAsyncioTestCase):
 
     async def _run(self, client_mock):
         """mock step_recorder + client,跑一次 execute,返回 WorkflowResult。"""
-        with patch("orchestrator.base.create_step", AsyncMock(return_value=1)), \
-             patch("orchestrator.base.finish_step", AsyncMock()), \
-             patch("orchestrator.base.update_compensation", AsyncMock()), \
+        with patch("orchestrator.workflow_engine.create_step", AsyncMock(return_value=1)), \
+             patch("orchestrator.workflow_engine.finish_step", AsyncMock()), \
+             patch("orchestrator.workflow_engine.update_compensation", AsyncMock()), \
              patch("orchestrator.workflow.meeting_room.client", client_mock):
             wf = MeetingRoomBookingWorkflow()
             return await wf.execute(self._args(), WorkflowExecutionContext())
@@ -105,9 +105,9 @@ class MeetingRoomWorkflowTest(unittest.IsolatedAsyncioTestCase):
 
         # 不走 _run(其内部 patch 会覆盖 update_compensation),此处自己展开 patch
         mock_comp = AsyncMock()
-        with patch("orchestrator.base.create_step", AsyncMock(return_value=1)), \
-             patch("orchestrator.base.finish_step", AsyncMock()), \
-             patch("orchestrator.base.update_compensation", mock_comp), \
+        with patch("orchestrator.workflow_engine.create_step", AsyncMock(return_value=1)), \
+             patch("orchestrator.workflow_engine.finish_step", AsyncMock()), \
+             patch("orchestrator.workflow_engine.update_compensation", mock_comp), \
              patch("orchestrator.workflow.meeting_room.client", client):
             wf = MeetingRoomBookingWorkflow()
             result = await wf.execute(self._args(), WorkflowExecutionContext())

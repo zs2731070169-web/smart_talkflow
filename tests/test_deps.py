@@ -17,7 +17,7 @@ import unittest
 from unittest.mock import AsyncMock, patch
 
 from api.deps import resolve_operator
-from orchestrator.base import BaseWorkflow
+from permission.permission import WorkflowRoleChecker
 from runtime.context import OperatorContext
 
 
@@ -53,50 +53,33 @@ class ResolveOperatorTest(unittest.TestCase):
         self.assertIsNone(resolve_operator({"X-Operator-Userid": "   "}))
 
 
-# ---- RBAC:用最小可实例化工作流驱动 is_allowed(mock checker)----
-class _Workflow(BaseWorkflow):
-    """最小可实例化工作流(仅用于驱动 is_allowed,不执行真实逻辑)。"""
-
-    name = "test_workflow"
-    description = ""
-    input_model = None  # type: ignore[assignment]
-
-    def business_key(self, arguments):
-        return None
-
-    async def execute(self, arguments, context):
-        ...
-
-
+# ---- RBAC:WorkflowRoleChecker.is_allowed(mock get_allowed_roles)----
 class IsAllowedTest(unittest.IsolatedAsyncioTestCase):
-    """BaseWorkflow.is_allowed:层 A 角色准入(查 workflow_role 配置 + 缓存)。"""
+    """WorkflowRoleChecker.is_allowed:层 A 角色准入(空集放行 / 命中放行 / 不命中拒绝)。"""
 
     def _op(self, roles):
         return OperatorContext(user_id="u", roles=list(roles))
 
     async def test_no_config_allows_everyone(self):
         """无配置(空集)= 全员可用。"""
-        with patch("orchestrator.base.workflow_role_checker") as mock_checker:
-            mock_checker.get_allowed_roles = AsyncMock(return_value=set())
-            wf = _Workflow()
-            self.assertTrue(await wf.is_allowed(self._op(["employee"])))
-            self.assertTrue(await wf.is_allowed(self._op([])))
+        checker = WorkflowRoleChecker()
+        with patch.object(checker, "get_allowed_roles", AsyncMock(return_value=set())):
+            self.assertTrue(await checker.is_allowed("test_workflow", self._op(["employee"])))
+            self.assertTrue(await checker.is_allowed("test_workflow", self._op([])))
 
     async def test_role_match_allows(self):
         """operator 角色命中配置的允许集合 -> 放行。"""
-        with patch("orchestrator.base.workflow_role_checker") as mock_checker:
-            mock_checker.get_allowed_roles = AsyncMock(return_value={"hr_admin"})
-            wf = _Workflow()
-            self.assertTrue(await wf.is_allowed(self._op(["hr_admin"])))
-            self.assertTrue(await wf.is_allowed(self._op(["hr_admin", "employee"])))
+        checker = WorkflowRoleChecker()
+        with patch.object(checker, "get_allowed_roles", AsyncMock(return_value={"hr_admin"})):
+            self.assertTrue(await checker.is_allowed("test_workflow", self._op(["hr_admin"])))
+            self.assertTrue(await checker.is_allowed("test_workflow", self._op(["hr_admin", "employee"])))
 
     async def test_role_mismatch_denies(self):
         """operator 角色不在允许集合 -> 拒绝。"""
-        with patch("orchestrator.base.workflow_role_checker") as mock_checker:
-            mock_checker.get_allowed_roles = AsyncMock(return_value={"hr_admin"})
-            wf = _Workflow()
-            self.assertFalse(await wf.is_allowed(self._op(["employee"])))
-            self.assertFalse(await wf.is_allowed(self._op([])))
+        checker = WorkflowRoleChecker()
+        with patch.object(checker, "get_allowed_roles", AsyncMock(return_value={"hr_admin"})):
+            self.assertFalse(await checker.is_allowed("test_workflow", self._op(["employee"])))
+            self.assertFalse(await checker.is_allowed("test_workflow", self._op([])))
 
 
 if __name__ == "__main__":

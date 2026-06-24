@@ -29,8 +29,8 @@ from infra.exceptions import (
 )
 from infra.database import db_session
 from infra.logger import setup_logging
-from infra.models import AdapterCallLog
-from runtime.context import get_operator, get_process_id
+from repository.models import AdapterCallLog
+from runtime.context import get_operator, get_process_id, get_step_id
 from services.credential import CredentialProvider, default_credential_provider
 from utils.trace_id_util import get_trace_id
 
@@ -70,10 +70,20 @@ class AdapterRequest:
 
 
 @dataclass(frozen=True)
+class AdapterResult:
+    """adapter 从下游响应提取的结构化业务结果。
+
+    :param data: 业务数据
+    """
+
+    data: Any = None
+
+
+@dataclass(frozen=True)
 class AdapterResponse:
     """单次外部调用的结构化留痕。
 
-    字段与 ``infra.models.AdapterCallLog`` 对齐,编排层可直接据此落库审计。
+    字段与 ``repository.models.AdapterCallLog`` 对齐,编排层可直接据此落库审计。
     """
 
     adapter: str
@@ -82,7 +92,7 @@ class AdapterResponse:
     method: str
     request_payload: dict = field(default_factory=dict)
     response_payload: dict = field(default_factory=dict)
-    result: dict = field(default_factory=dict)  # 提取出来的业务结果
+    result: AdapterResult = field(default_factory=AdapterResult)
     http_status: int = 200
     duration: int = 0
     is_error: bool = False
@@ -109,7 +119,7 @@ class BaseAdapter(ABC):
             self,
             base_url: str = "",
             credential_provider: CredentialProvider | None = None,
-    ) -> None:
+    ):
         self.base_url = base_url
         # 凭证默认按 target_system 自动加载服务账号; 也可显式注入覆盖。
         self.credential_provider = (credential_provider or default_credential_provider(self.target_system))
@@ -130,7 +140,7 @@ class BaseAdapter(ABC):
 
         http_status = 0
         response_payload: dict = {}
-        result: dict = {}
+        result = AdapterResult()
         error_message: str | None = None
         is_error: bool = False
 
@@ -196,7 +206,7 @@ class BaseAdapter(ABC):
             async with db_session() as session:
                 session.add(AdapterCallLog(
                     process_id=get_process_id(),
-                    step_execution_id=None,  # 阶段一留空,靠 process_id 逻辑关联
+                    step_execution_id=get_step_id(),
                     adapter=self.adapter_name,
                     target_system=self.target_system,
                     action=request.action,
@@ -236,5 +246,5 @@ class BaseAdapter(ABC):
         """判定本次调用是否业务成功,并给出失败原因"""
 
     @abstractmethod
-    def extract_result(self, payload: dict) -> dict:
-        """从响应体提取业务字段"""
+    def extract_result(self, payload: dict) -> AdapterResult:
+        """从响应体提取结构化业务结果(含外部业务键 external_ref)"""

@@ -39,9 +39,9 @@ class OpenAIClient:
             "stream": True,
         }
 
-        # workflows 透传为 OpenAI tools(为空则不传)
+        # workflows 透传为 OpenAI workflow(为空则不传)
         if request.tools:
-            kwargs["tools"] = request.tools
+            kwargs["workflow"] = request.tools
 
         # 流式拉取:逐 chunk 吐出文本片段;
         # tool_calls 为增量协议,按 index 聚合 id / name / arguments
@@ -123,7 +123,7 @@ class AnthropicApiClient:
         if system_prompt:
             kwargs["system"] = system_prompt
         if request.tools:
-            kwargs["tools"] = request.tools
+            kwargs["workflow"] = request.tools
 
         # 流式拉取:text_stream 逐片段吐出,get_final_message 聚合完整响应(含 tool_use)
         async with self._client.messages.stream(**kwargs) as stream:

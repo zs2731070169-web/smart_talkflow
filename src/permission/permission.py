@@ -14,8 +14,9 @@ from sqlalchemy import select
 
 from conf.config import settings
 from infra.database import db_session
-from infra.models import WorkflowRole
+from repository.models import WorkflowRole
 from infra.redis_client import get_redis
+from runtime.context import OperatorContext
 
 
 class WorkflowRoleChecker:
@@ -48,6 +49,13 @@ class WorkflowRoleChecker:
             ex=settings.workflow_role_cache_ttl,
         )
         return roles
+
+    async def is_allowed(self, workflow_name: str, operator: OperatorContext) -> bool:
+        """operator 是否有权触发该 workflow(空集 = 全员可用,非空比对角色)。"""
+        roles = await self.get_allowed_roles(workflow_name)
+        if not roles:
+            return True
+        return bool(set(operator.roles) & roles)
 
     async def invalidate(self, workflow_name: str) -> None:
         """清缓存(运维改 ``workflow_role`` 后调,立即生效)。"""
