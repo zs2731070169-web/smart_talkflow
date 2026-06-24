@@ -174,6 +174,7 @@ async def run_steps(process_id: int | None, steps: list[WorkflowStep]) -> Workfl
                     f"(已自动补偿 {sum(1 for done in done_step_list if done.step.compensate is not None)} 个可补偿步骤)"
                 ),
                 is_error=True,
+                retryable=True,
                 metadata={"completed_steps": len(steps_meta) - 1, "steps": steps_meta},
             )
 
