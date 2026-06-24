@@ -123,7 +123,7 @@ class WorkflowDispatcher:
         workflow = self._registry.get_workflow(name)
         if workflow is None:
             logger.warning("未知工作流: %s", name)
-            return WorkflowResult(output=f"未知工作流: {name}", is_error=True)
+            return WorkflowResult(output=f"未知工作流: {name}", is_error=True, retryable=True)
 
         # 3. 权限:operator 角色不在 workflow_role 配置的白名单里则拒执行
         if not await workflow_role_checker.is_allowed(workflow.name, operator):
@@ -135,14 +135,14 @@ class WorkflowDispatcher:
             inputs = workflow.input_model.model_validate(arguments)
         except ValidationError as e:
             logger.warning("工作流 %s 参数校验失败: %s", name, e)
-            return WorkflowResult(output=str(e), is_error=True)
+            return WorkflowResult(output=str(e), is_error=True, retryable=True)
 
-        # 5. 幂等校验(命中终态时短路返回)
-        checker, checked, short_circuit = await _check_idempotency(
+        # 5. 幂等校验(命中终态时直接短路返回)
+        checker, checked, workflow_result = await _check_idempotency(
             workflow, inputs, operator, max_retry
         )
-        if short_circuit is not None:
-            return short_circuit
+        if workflow_result is not None:
+            return workflow_result
 
         # 6. 回填 process_id 到请求上下文,供 adapter 落 adapter_call_logs 关联
         if checked is not None and checked.process is not None:

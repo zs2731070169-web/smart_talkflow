@@ -31,6 +31,7 @@ class WorkflowResult(BaseModel):
 
     output: str
     is_error: bool = False
+    retryable: bool = False
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
