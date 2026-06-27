@@ -5,6 +5,7 @@
 其 :meth:`~runtime.runner.Runtime.run` 已流式产出 SSE ``data:`` 行,router 直接
 ``StreamingResponse`` 返回——SSE 序列化归 runtime,runtime 不在请求内重新装配。
 """
+
 from __future__ import annotations
 
 from typing import Annotated

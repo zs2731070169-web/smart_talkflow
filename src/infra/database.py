@@ -11,10 +11,11 @@
         session.add(obj)
     # 正常退出自动提交;异常自动回滚,连接归还连接池
 """
+
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import AsyncIterator
 
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
@@ -43,8 +44,8 @@ async_engine: AsyncEngine = _create_engine()
 AsyncSessionLocal: async_sessionmaker[AsyncSession] = async_sessionmaker(
     bind=async_engine,
     class_=AsyncSession,
-    expire_on_commit=False, # 提交事务后，不将对象标记为"过期", 否则异步场景下会报错. commit() 后对象仍可直接访问，无需重新查询
-    autoflush=False, # 禁止自动 flush，改为手动控制. 数据写入完全由你控制，必须通过  await session.flush()  显式执行sql
+    expire_on_commit=False,  # 提交事务后，不将对象标记为"过期", 否则异步场景下会报错. commit() 后对象仍可直接访问，无需重新查询
+    autoflush=False,  # 禁止自动 flush，改为手动控制. 数据写入完全由你控制，必须通过  await session.flush()  显式执行sql
 )
 
 
@@ -57,7 +58,7 @@ async def db_session() -> AsyncIterator[AsyncSession]:
     """
     async with AsyncSessionLocal() as session:
         try:
-            yield session # 暂停, 把 session 交给业务代码执行
+            yield session  # 暂停, 把 session 交给业务代码执行
             await session.commit()
         except Exception:
             await session.rollback()

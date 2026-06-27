@@ -1,4 +1,4 @@
-from typing import Literal, Any, Annotated
+from typing import Annotated, Any, Literal
 from uuid import uuid4
 
 from openai import BaseModel

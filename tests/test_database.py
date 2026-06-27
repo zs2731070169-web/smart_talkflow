@@ -10,6 +10,7 @@
 
     python -m unittest tests.test_database
 """
+
 import unittest
 
 from sqlalchemy import text

@@ -8,6 +8,7 @@
 
     python -m unittest tests.test_system_prompt
 """
+
 import unittest
 
 from engine.prompts.envirement import EnvironmentInfo

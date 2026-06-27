@@ -11,6 +11,7 @@
 
     PYTHONPATH=src python -m unittest tests.test_sso
 """
+
 import json
 import time
 import unittest
@@ -79,7 +80,9 @@ class ResolveOperatorFromSsoTest(unittest.IsolatedAsyncioTestCase):
             "exp": now - 10 if expired else now + 3600,
         }
         return jwt.encode(
-            payload, _private_pem(self.private), algorithm="RS256",
+            payload,
+            _private_pem(self.private),
+            algorithm="RS256",
             headers={"kid": self.kid},
         )
 
@@ -111,7 +114,9 @@ class ResolveOperatorFromSsoTest(unittest.IsolatedAsyncioTestCase):
         now = int(time.time())
         token = jwt.encode(
             {"sub": "x", "iss": "test-iss", "iat": now, "exp": now + 3600},
-            _private_pem(other_priv), algorithm="RS256", headers={"kid": self.kid},
+            _private_pem(other_priv),
+            algorithm="RS256",
+            headers={"kid": self.kid},
         )
         with self.assertRaises(UnauthorizedException):
             await resolve_operator_from_sso(token)
@@ -121,7 +126,9 @@ class ResolveOperatorFromSsoTest(unittest.IsolatedAsyncioTestCase):
         now = int(time.time())
         token = jwt.encode(
             {"sub": "x", "iss": "test-iss", "iat": now, "exp": now + 3600},
-            _private_pem(self.private), algorithm="RS256", headers={"kid": "unknown-kid"},
+            _private_pem(self.private),
+            algorithm="RS256",
+            headers={"kid": "unknown-kid"},
         )
         with self.assertRaises(UnauthorizedException):
             await resolve_operator_from_sso(token)

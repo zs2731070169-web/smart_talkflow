@@ -1,6 +1,6 @@
+from collections.abc import AsyncGenerator
 from dataclasses import dataclass, field
-from typing import Any, AsyncGenerator
-from typing import Protocol
+from typing import Any, Protocol
 
 from engine.client.messages import ConversationMessage
 

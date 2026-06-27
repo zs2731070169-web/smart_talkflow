@@ -2,7 +2,7 @@
 
 与 :mod:`repository.step_tracker`(``process_step`` 表)并列——这两张孪生表的
 所有读写操作统一收口在 repository 层。本模块只做「持久化 + 事务/并发兜底」,
-**不含幂等状态机判定**:`status` 的合法取值、状态迁移的前驱约束(``_FROM_*``)、
+**不含幂等状态机判定**:`status` 的合法取值、状态迁移的前驱约束、
 命中分流决策属于编排领域逻辑,见 :mod:`orchestrator.idempotency`。
 
 风格同 step_tracker:显式 ``flush``(``autoflush=False``)、唯一索引冲突回查兜底、
@@ -13,18 +13,21 @@
     - :func:`acquire_or_create`:幂等闸门的持久化部分——先查后插 + 冲突回查,
       返回 :class:`AcquiredProcess`(命中已存在记录 / 本次新建 / 冲突回查未命中)。
     - :func:`transition_status`:带前驱约束的单次状态迁移(completed/failed/reject)。
-    - :func:`increment_attempt`:累加重试计数。
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import select
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy import or_, select, update
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 from infra.database import db_session
+from infra.logger import setup_logging
 from repository.models import Process
+
+logger = setup_logging(__name__)
 
 
 @dataclass(frozen=True)
@@ -42,20 +45,21 @@ class AcquiredProcess:
 
 def _datetime_now() -> datetime:
     """当前 UTC 时间(naive,与 MySQL DATETIME 列对齐)。"""
-    return datetime.now(timezone.utc).replace(tzinfo=None)
+    return datetime.now(UTC).replace(tzinfo=None)
 
 
 async def acquire_or_create(
-        *,
-        process_key: str,
-        business_key: str,
-        idempotency_key: str,
-        status: str,
-        input_params: dict | None,
-        context: dict | None,
-        created_by: str | None,
-        trace_id: str | None,
-        request_log_id: int | None,
+    *,
+    process_key: str,
+    business_key: str,
+    idempotency_key: str,
+    status: str,
+    input_params: dict | None,
+    context: dict | None,
+    created_by: str | None,
+    trace_id: str | None,
+    request_log_id: int | None,
+    operator_context: dict | None = None,
 ) -> AcquiredProcess:
     """幂等占位获取:先查后插 + 唯一索引冲突回查(并发兜底)。
 
@@ -87,6 +91,8 @@ async def acquire_or_create(
             trace_id=trace_id,
             request_log_id=request_log_id,
             started_at=_datetime_now(),
+            heartbeat_at=_datetime_now(),
+            operator_context=operator_context,
         )
         session.add(process)
         try:
@@ -104,22 +110,22 @@ async def acquire_or_create(
 
 
 async def transition_status(
-        process_id: int,
-        target_status: str,
-        from_status: set[str],
-        extra: dict | None = None,
+    process_id: int,
+    target_status: str,
+    from_status: str,
+    extra: dict | None = None,
 ) -> bool:
-    """带前驱约束的状态迁移:仅当当前 status ∈ from_status 时才推进到 target。
+    """带前驱约束的状态迁移:仅当当前 status == from_status 时才推进到 target。
 
-    用于幂等状态机的终态收尾(completed/failed/reject)。前驱集合 ``from_status``
+    用于幂等状态机的终态收尾(completed/failed)。前驱状态 ``from_status``(单个)
     由编排层传入,承载「避免跨态跳跃」的业务规则(见 ``orchestrator.idempotency``
-    的 ``_FROM_*`` 常量)。
+    )。
 
     :returns: 是否实际推进(前驱不满足则静默跳过,返回 ``False``)。
     """
     async with db_session() as session:
         row = await session.get(Process, process_id)
-        if row is None or row.status not in from_status:
+        if row is None or row.status != from_status:
             return False
         row.status = target_status
         for field, value in (extra or {}).items():
@@ -129,19 +135,54 @@ async def transition_status(
         return True
 
 
-async def increment_attempt(process_id: int) -> None:
-    """累加 ``context.attempt``(FAILED 重试计数,供超 ``max_retry`` 判 reject)。"""
-    async with db_session() as session:
-        row = await session.get(Process, process_id)
-        if row is None:
-            return
-        ctx = dict(row.context or {})
-        ctx["attempt"] = int(ctx.get("attempt", 1)) + 1
-        row.context = ctx
-        await session.flush()
-
-
 async def _find_by_key(session, idempotency_key: str) -> Process | None:
     stmt = select(Process).where(Process.idempotency_key == idempotency_key)
     result = await session.execute(stmt)
     return result.scalar_one_or_none()
+
+
+async def flush_heartbeat(process_id: int | None) -> None:
+    """续心跳: 每一步把 heartbeat_at 刷新为当前时间"""
+    if process_id is None:
+        return
+    try:
+        async with db_session() as session:
+            await session.execute(update(Process).where(Process.id == process_id).values(heartbeat_at=_datetime_now()))
+            await session.flush()
+    except SQLAlchemyError:
+        logger.exception("续心跳失败(process_id=%s)", process_id)
+
+
+async def detect(timeout_seconds: int) -> list[Process]:
+    """检测卡住/未上报心跳的工作流:status='running' 且(阈值时间超过最后一次心跳时间或未上报最后一次心跳)"""
+    # 计算超时阈值的时间: 用"当前时间点"减去"一段时间"
+    threshold = _datetime_now() - timedelta(seconds=timeout_seconds)
+    async with db_session() as session:
+        stmt = select(Process).where(
+            Process.status == "running",
+            # 计算的阈值时间超过最后一次心跳的时间或者最后一次心跳未上报都会被命中
+            or_(Process.heartbeat_at < threshold, Process.heartbeat_at.is_(None)),
+        )
+        result = await session.execute(stmt)
+        return list(result.scalars().all())
+
+
+async def acquire_recovery_lock(process_id: int, timeout_seconds: int) -> bool:
+    """原子抢恢复权:仅当仍 running 且心跳超时或心跳未上报,才刷新心跳并返回 True。
+
+    多实例并发只有一个抢到恢复权; 在此时心跳已被刷新、条件不再满足, 其它实例无法重复更新
+    """
+    # 计算超时阈值的时间: 用"当前时间点"减去"一段时间"
+    threshold = _datetime_now() - timedelta(seconds=timeout_seconds)
+    async with db_session() as session:
+        result = await session.execute(
+            update(Process)
+            .where(
+                Process.id == process_id,
+                Process.status == "running",
+                or_(Process.heartbeat_at < threshold, Process.heartbeat_at.is_(None)),
+            )
+            .values(heartbeat_at=_datetime_now())
+        )
+        await session.flush()
+        return result.rowcount == 1

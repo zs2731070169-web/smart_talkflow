@@ -8,6 +8,7 @@
 这是平台「请求级执行上下文」的归宿(见 CLAUDE.md「runtime/」层):api 层构建,
 串联 parse → resolve → 幂等 → orchestrator 全链,承载意图 / 参数 / 幂等键 / 步骤
 """
+
 from __future__ import annotations
 
 from contextvars import ContextVar
@@ -16,18 +17,33 @@ from dataclasses import dataclass, field
 
 @dataclass
 class OperatorContext:
-    """操作人身份(来自认证层 / SSO 登录态,请求级确立)。
-
-    下游调用时作为「代签」身份透传给 yudao ``AgentDelegationFilter``,由其改写
-    当前用户为本操作人,使 ``@PreAuthorize`` 按真实用户权限判定、审计归属真实用户。
-
-    严禁来自请求体 / LLM 参数(可伪造)——只来自可信的认证来源。
-    """
+    """操作人身份(来自认证层 / SSO 登录)"""
 
     user_id: str  # 真实操作人标识
     roles: list[str] = field(default_factory=list)  # 平台 RBAC 角色(层 A 授权用)
     tenant_id: str = ""  # 所属租户
     name: str = ""  # 操作人显示名(代签 X-Operator-Name 头,审计用)
+
+    def to_operator_context(self) -> dict:
+        """序列化 OperatorContext, 重建操作人身份"""
+        return {
+            "user_id": self.user_id,
+            "roles": list(self.roles),
+            "tenant_id": self.tenant_id,
+            "name": self.name,
+        }
+
+    @classmethod
+    def from_operator_context(cls, operator_context: dict | None) -> OperatorContext | None:
+        """反序列化为 OperatorContext"""
+        if not operator_context:
+            return None
+        return cls(
+            user_id=operator_context.get("user_id", ""),
+            roles=list(operator_context.get("roles") or []),
+            tenant_id=operator_context.get("tenant_id", ""),
+            name=operator_context.get("name", ""),
+        )
 
 
 @dataclass
@@ -46,10 +62,8 @@ class RequestContext:
     step_id: int | None = None
 
 
-# ContextVar:持有当前请求的 RequestContext。
-_request_context: ContextVar[RequestContext | None] = ContextVar(
-    "request_context", default=None
-)
+# ContextVar:持有当前请求的 RequestContext
+_request_context: ContextVar[RequestContext | None] = ContextVar("request_context", default=None)
 
 
 def set_request_context(ctx: RequestContext | None) -> None:

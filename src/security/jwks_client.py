@@ -4,6 +4,7 @@
 按 token header 的 ``kid`` 定位公钥。JWKS 经 redis 缓存(TTL),减少对 SSO 的请求;
 ``kid`` 未命中时强制刷新一次(应对密钥轮换)。
 """
+
 from __future__ import annotations
 
 import json

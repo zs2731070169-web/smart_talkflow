@@ -15,6 +15,7 @@
     PYTHONPATH=src python -m utils.api_key_util                 # 生成一对 api-key + hash
     PYTHONPATH=src python -m utils.api_key_util --api-key <明文> # 给定明文算 hash
 """
+
 from __future__ import annotations
 
 import argparse
@@ -41,15 +42,15 @@ def api_key_hash(api_key: str) -> str:
 
 
 def _main() -> int:
-    parser = argparse.ArgumentParser(
-        description="生成 Agent 服务账号 api-key + SHA-256 hash(yudao api-key-hash)"
-    )
+    parser = argparse.ArgumentParser(description="生成 Agent 服务账号 api-key + SHA-256 hash(yudao api-key-hash)")
     parser.add_argument(
         "--api-key",
         help="给定明文 api-key 算其 hash;不填则新生成一对(api-key + hash)",
     )
     parser.add_argument(
-        "--bytes", type=int, default=32,
+        "--bytes",
+        type=int,
+        default=32,
         help="生成 api-key 的随机字节数(默认 32)",
     )
     args = parser.parse_args()

@@ -7,6 +7,7 @@
 
     python -m unittest tests.test_logger
 """
+
 import logging
 import unittest
 

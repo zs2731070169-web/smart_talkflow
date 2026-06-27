@@ -11,6 +11,7 @@
     logger = logger.setup_logging(__name__)
     logger.info("用户请求开始")
 """
+
 from __future__ import annotations
 
 import logging
@@ -40,6 +41,7 @@ class TraceIdFilter(logging.Filter):
 
 class LoggerFormatter(logging.Formatter):
     """日志样式配置"""
+
     grey = "\x1b[90;20m"  # 灰色(亮黑)
     green = "\x1b[32;20m"  # 绿色
     yellow = "\x1b[33;20m"  # 黄色

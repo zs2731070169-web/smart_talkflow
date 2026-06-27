@@ -11,6 +11,7 @@ def get_trace_id() -> str | None:
     """读取当前上下文的 trace_id,可能为 ``None``。"""
     return trace_id_context.get()
 
+
 def new_trace_id() -> str:
     """生成一个新的 trace_id 并写入当前上下文,返回该值。"""
     trace_id = uuid.uuid4().hex

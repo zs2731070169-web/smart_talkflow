@@ -1,72 +1,56 @@
-"""会议室预订业务域适配器。
+"""会议室预订业务域适配器(yudao ``/admin-api/oa/meeting-room-booking/*``)。
 
-封装 yudao OA「会议室预订」的 HTTP 调用,对应会议室预订正向链路:
-``submit → approve → update-use-status``。
-
-yudao 统一响应 ``CommonResult{code, msg, data}``,``code == 0`` 视为业务成功,
-``data`` 为业务结果(submit 返回 bookingId,approve/update 返回 true)。
+封装会议室预订正向链路(submit → approve → update-use-status)+ 补偿(cancel)。
+继承 :class:`OAAdapter`,复用 yudao 系统级协议解析(``is_success`` / ``extract_result``)与 ``target_system = "oa"``。
+action 经 ``_step_call`` 返回 :class:`StepResult`(adapter 层转 AdapterResponse,引擎不认 AdapterResponse)。
 """
-from dataclasses import dataclass
 
-from adapters.base import AdapterRequest, AdapterResponse, AdapterResult, BaseAdapter
+from __future__ import annotations
 
+from typing import TYPE_CHECKING
 
-@dataclass
-class SubmitBookingRequest:
-    """提交会议室预订请求(submit 的 JSON body)。
+from adapters.base import AdapterRequest
+from adapters.oa_adapter.oa_base import OAAdapter
+from conf import settings
 
-    字段名与 yudao ``MeetingRoomBookingSaveReqVO`` 对齐(非 curl 示例的简化名)。
-    ``creator`` 必传(yudao 用其发起 BPM 审批流程),取自当前 operator.user_id。
-    """
-
-    room_id: int  # 会议室ID
-    meeting_title: str  # 会议名称
-    meeting_start_time: str  # 会议开始时间(yyyy-MM-dd HH:mm:ss)
-    meeting_end_time: str  # 会议结束时间
-    creator: str  # 创建人(用户ID字符串,发起 BPM 用)
-    moderator_id: int  # 主持人ID
+if TYPE_CHECKING:
+    from orchestrator.workflow_engine import StepResult
 
 
-class MeetingRoomBookingAdapter(BaseAdapter):
+class MeetingRoomBookingAdapter(OAAdapter):
     """会议室预订业务域适配器(yudao ``/admin-api/oa/meeting-room-booking/*``)。"""
 
     adapter_name = "oa_adapter_meeting_room"
-    target_system = "oa"
 
-    def is_success(self, http_status: int, response_payload: dict) -> tuple[bool, str | None]:
-        """yudao 判定:HTTP 2xx 且 body ``code == 0`` 视为业务成功。"""
-        if not (200 <= http_status < 300):
-            return False, None
-        code = response_payload.get("code")
-        if code == 0:
-            return True, None
-        return False, response_payload.get("msg") or f"业务失败 code={code}"
-
-    def extract_result(self, payload: dict) -> AdapterResult:
-        """提取 yudao 响应的 ``data``"""
-        return AdapterResult(data=payload.get("data"))
-
-    async def submit_booking(self, request: SubmitBookingRequest) -> AdapterResponse:
+    async def submit_booking(
+        self,
+        room_id: int,
+        meeting_title: str,
+        meeting_start_time: str,
+        meeting_end_time: str,
+        creator: str,
+        moderator_id: int,
+    ) -> StepResult:
         """Step 1 提交会议室预订(发起审批),返回 bookingId。"""
-        return await self._call_action(
+        return await self.step_call(
             AdapterRequest(
                 action="submit_booking",
                 method="POST",
                 path="/admin-api/oa/meeting-room-booking/submit",
                 payload={
-                    "roomId": request.room_id,
-                    "meetingTitle": request.meeting_title,
-                    "meetingStartTime": request.meeting_start_time,
-                    "meetingEndTime": request.meeting_end_time,
-                    "creator": request.creator,
-                    "moderatorId": request.moderator_id,
+                    "roomId": room_id,
+                    "meetingTitle": meeting_title,
+                    "meetingStartTime": meeting_start_time,
+                    "meetingEndTime": meeting_end_time,
+                    "creator": creator,
+                    "moderatorId": moderator_id,
                 },
             )
         )
 
-    async def approve_booking(self, booking_id: int) -> AdapterResponse:
+    async def approve_booking(self, booking_id: int) -> StepResult:
         """Step 2 审批通过会议室预订。"""
-        return await self._call_action(
+        return await self.step_call(
             AdapterRequest(
                 action="approve_booking",
                 method="PUT",
@@ -75,9 +59,9 @@ class MeetingRoomBookingAdapter(BaseAdapter):
             )
         )
 
-    async def update_use_status(self, booking_id: int, use_status: int) -> AdapterResponse:
+    async def update_use_status(self, booking_id: int, use_status: int) -> StepResult:
         """Step 3 更新使用状态(0待使用/1使用中/2已完成/3已取消)。"""
-        return await self._call_action(
+        return await self.step_call(
             AdapterRequest(
                 action="update_use_status",
                 method="PUT",
@@ -86,7 +70,7 @@ class MeetingRoomBookingAdapter(BaseAdapter):
             )
         )
 
-    async def cancel_booking(self, booking_id: int) -> AdapterResponse:
+    async def cancel_booking(self, booking_id: int) -> StepResult:
         """补偿动作:取消会议室预订。
 
         yudao ``PUT /cancel`` 是终态覆盖(一次性置 ``useStatus=3`` + ``processStatus=4``),
@@ -94,7 +78,7 @@ class MeetingRoomBookingAdapter(BaseAdapter):
         yudao 不校验源状态、纯状态覆盖,故重复调用同一 booking_id 幂等无害——适合 Saga
         逆序补偿多次重试。
         """
-        return await self._call_action(
+        return await self.step_call(
             AdapterRequest(
                 action="cancel_booking",
                 method="PUT",
@@ -102,3 +86,6 @@ class MeetingRoomBookingAdapter(BaseAdapter):
                 params={"id": booking_id},
             )
         )
+
+
+room_booking_adapter = MeetingRoomBookingAdapter(base_url=settings.oa_base_url)

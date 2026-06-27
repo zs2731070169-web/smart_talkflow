@@ -8,11 +8,14 @@
 (并 ``set_step_id(step_id)`` 供 adapter 审计留痕关联),执行后调 :func:`finish_step`
 写结果;补偿时调 :func:`mark_compensation` 标记补偿状态。
 """
+
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import Enum
+from typing import Any
 
+from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 
 from infra.database import db_session
@@ -40,17 +43,17 @@ class CompensationStatus(str, Enum):
 
 def _datetime_now() -> datetime:
     """当前 UTC 时间(naive,与 MySQL DATETIME 列对齐)。"""
-    return datetime.now(timezone.utc).replace(tzinfo=None)
+    return datetime.now(UTC).replace(tzinfo=None)
 
 
 async def create_step(
-        process_id: int,
-        step_no: int,
-        step_key: str,
-        step_name: str,
-        adapter: str,
-        action: str,
-        input_params: dict | None = None,
+    process_id: int,
+    step_no: int,
+    step_key: str,
+    step_name: str,
+    adapter: str,
+    action: str,
+    input_params: dict | None = None,
 ) -> int | None:
     """插入一条 ``status=running`` 的 :class:`ProcessStep` 占位,返回自增主键 id。
 
@@ -88,20 +91,20 @@ async def create_step(
 
 
 async def finish_step(
-        step_id: int,
-        *,
-        status: StepStatus,
-        output_result: dict | None = None,
-        external_ref: str | None = None,
-        error_message: str | None = None,
-        duration_ms: int | None = None,
+    step_id: int,
+    *,
+    status: StepStatus,
+    output_result: dict | None = None,
+    result_data: Any | None = None,
+    error_message: str | None = None,
+    duration_ms: int | None = None,
 ) -> None:
     """更新步骤执行结果(:attr:`StepStatus.COMPLETED` / :attr:`StepStatus.FAILED`)与产出。
 
     :param step_id: :func:`create_step` 返回的步骤 id
     :param status: 终态枚举
     :param output_result: 步骤产出(落 JSON 列,如下游响应体)
-    :param external_ref: 外部业务键(如 yudao 返回的 bookingId,补偿时回取)
+    :param result_data: 步产出/结果数据(extract 提取的业务结果,如 bookingId/emp 对象;只有 yields 的步写,供 recovery 重建 ref)
     :param error_message: 失败原因
     :param duration_ms: 执行耗时(毫秒)
     """
@@ -112,8 +115,8 @@ async def finish_step(
                 return
             row.status = status.value
             row.output_result = output_result
-            if external_ref is not None:
-                row.external_ref = str(external_ref)
+            if result_data is not None:
+                row.result_data = result_data
             row.error_message = error_message
             row.duration_ms = duration_ms
             row.finished_at = _datetime_now()
@@ -137,3 +140,22 @@ async def update_compensation(step_id: int, status: CompensationStatus) -> None:
             await session.flush()
     except SQLAlchemyError:
         logger.exception("标记 ProcessStep 补偿状态失败(step_id=%s status=%s)", step_id, status)
+
+
+async def list_completed_steps(process_id: int) -> list[tuple[int, str, Any | None]]:
+    """查指定流程下所有 completed 步,返回 [(step_no, step_key, result_data), ...](按 step_no 升序)。
+
+    返回 list(而非 dict):同名 step_key 不会互相覆盖;recovery 按 step_no 对齐声明顺序回填。
+    result_data 是各步产出(泛型值),补偿时回填到该步 yields slot。
+    """
+    async with db_session() as session:
+        stmt = (
+            select(ProcessStep.step_no, ProcessStep.step_key, ProcessStep.result_data)
+            .where(
+                ProcessStep.process_id == process_id,
+                ProcessStep.status == StepStatus.COMPLETED.value,
+            )
+            .order_by(ProcessStep.step_no)
+        )
+        result = await session.execute(stmt)
+        return list(result.all())

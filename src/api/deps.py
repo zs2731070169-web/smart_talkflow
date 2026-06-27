@@ -7,9 +7,10 @@
   即作为 ``Depends(get_current_operator)`` 生效。
 
 """
+
 from __future__ import annotations
 
-from typing import Mapping
+from collections.abc import Mapping
 
 import jwt
 from fastapi import Request
@@ -95,7 +96,7 @@ async def resolve_operator_from_sso(token: str) -> OperatorContext | None:
     )
 
 
-async def get_current_operator(request: "Request") -> OperatorContext:
+async def get_current_operator(request: Request) -> OperatorContext:
     """FastAPI 依赖:解析登录态 → 注入请求级上下文 → 返回操作人。"""
     if settings.auth_dev_mode:
         operator = resolve_operator(request.headers)

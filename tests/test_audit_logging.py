@@ -7,6 +7,7 @@
 
     PYTHONPATH=src python -m unittest tests.test_audit_logging
 """
+
 import unittest
 from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -50,11 +51,13 @@ class AdapterCallLogTest(unittest.IsolatedAsyncioTestCase):
 
     async def asyncSetUp(self):
         self._trace_token = trace_id_context.set("trace-1")
-        set_request_context(RequestContext(
-            operator=OperatorContext(user_id="9527", tenant_id="1", name="王五"),
-            trace_id="trace-1",
-            process_id=100,
-        ))
+        set_request_context(
+            RequestContext(
+                operator=OperatorContext(user_id="9527", tenant_id="1", name="王五"),
+                trace_id="trace-1",
+                process_id=100,
+            )
+        )
 
     async def asyncTearDown(self):
         set_request_context(None)
@@ -75,9 +78,14 @@ class AdapterCallLogTest(unittest.IsolatedAsyncioTestCase):
         mock_http.request = AsyncMock(return_value=resp)
 
         with patch("adapters.base.http", mock_http), patch("adapters.base.db_session", fake_db):
-            await adapter._call_action(AdapterRequest(
-                action="submit_booking", method="POST", path="/api/x", payload={"roomId": 1},
-            ))
+            await adapter._call_action(
+                AdapterRequest(
+                    action="submit_booking",
+                    method="POST",
+                    path="/api/x",
+                    payload={"roomId": 1},
+                )
+            )
         return captured
 
     async def test_success_call_logs_full_audit_fields(self):

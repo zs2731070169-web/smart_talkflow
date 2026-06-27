@@ -1,5 +1,6 @@
 import json
-from typing import Any, AsyncGenerator
+from collections.abc import AsyncGenerator
+from typing import Any
 
 from anthropic import AsyncAnthropic
 from openai import AsyncOpenAI
@@ -68,15 +69,15 @@ class OpenAIClient:
         # 聚合结果映射为统一的 TextBlock / ToolUseBlock,屏蔽 sdk 差异
         blocks: list[Any] = []
         for slot in tool_calls.values():
-            blocks.append(ToolUseBlock(
-                id=slot["id"],
-                name=slot["name"],
-                input=json.loads(slot["arguments"] or "{}"),
-            ))
+            blocks.append(
+                ToolUseBlock(
+                    id=slot["id"],
+                    name=slot["name"],
+                    input=json.loads(slot["arguments"] or "{}"),
+                )
+            )
 
-        yield ApiMessageCompleteEvent(
-            message=ConversationMessage(role="assistant", content=blocks)
-        )
+        yield ApiMessageCompleteEvent(message=ConversationMessage(role="assistant", content=blocks))
 
 
 class AnthropicApiClient:
@@ -137,7 +138,4 @@ class AnthropicApiClient:
             if block.type == "tool_use":
                 blocks.append(ToolUseBlock(id=block.id, name=block.name, input=block.input))
 
-        yield ApiMessageCompleteEvent(
-            message=ConversationMessage(role="assistant", content=blocks)
-        )
-
+        yield ApiMessageCompleteEvent(message=ConversationMessage(role="assistant", content=blocks))

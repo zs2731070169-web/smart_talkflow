@@ -13,6 +13,7 @@ SSO(JWT 验签)路径由 ``tests.test_sso`` 覆盖。
 
     PYTHONPATH=src python -m unittest tests.test_deps
 """
+
 import unittest
 from unittest.mock import AsyncMock, patch
 
@@ -26,11 +27,13 @@ class ResolveOperatorTest(unittest.TestCase):
 
     def test_full_headers_parse(self):
         """全头齐备:user_id / tenant / roles 正确解析,roles 按逗号拆分。"""
-        op = resolve_operator({
-            "X-Operator-Userid": "9527",
-            "X-Operator-Tenant": "1",
-            "X-Operator-Roles": "hr_admin, employee",
-        })
+        op = resolve_operator(
+            {
+                "X-Operator-Userid": "9527",
+                "X-Operator-Tenant": "1",
+                "X-Operator-Roles": "hr_admin, employee",
+            }
+        )
         self.assertIsNotNone(op)
         self.assertEqual(op.user_id, "9527")
         self.assertEqual(op.tenant_id, "1")

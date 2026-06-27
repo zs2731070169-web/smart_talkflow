@@ -45,7 +45,7 @@ erDiagram
         varchar  adapter "适配器(泛型 oa/email)"
         varchar  action "动作(泛型 create/grant)"
         varchar  status "pending/running/completed/failed"
-        varchar  external_ref "外部系统返回引用(emp_id/account)"
+        json     result_data "步产出(extract 提取的业务结果,如 bookingId/emp 对象;只有 yields 的步写)"
         varchar  compensation_status "none/pending/done/failed 阶段4用"
     }
 

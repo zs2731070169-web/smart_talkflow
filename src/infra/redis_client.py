@@ -11,6 +11,7 @@
     await redis.set("jwks:xxx", json_str, ex=3600)
     cached = await redis.get("jwks:xxx")
 """
+
 from __future__ import annotations
 
 import redis.asyncio as redis

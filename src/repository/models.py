@@ -21,28 +21,26 @@
     async with db_session() as session:
         session.add(Process(process_key="onboarding", ...))
 """
+
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Any
 
-from sqlalchemy import BigInteger, DateTime, Integer, JSON, String, Text, UniqueConstraint, func
+from sqlalchemy import JSON, BigInteger, DateTime, Integer, String, Text, UniqueConstraint, func
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
 class Base(DeclarativeBase):
     """所有 ORM 模型的声明基类。"""
 
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime, nullable=False, server_default=func.now()
-    )
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())
 
 
 class UpdatedAt:
     """为模型追加 ``updated_at`` 字段。"""
 
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime, nullable=False, server_default=func.now()
-    )
+    updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())
 
 
 class RequestLog(Base):
@@ -55,9 +53,7 @@ class RequestLog(Base):
     user_input: Mapped[str] = mapped_column(Text, nullable=False)
     parsed_intent: Mapped[str | None] = mapped_column(String(64))
     parsed_params: Mapped[dict | None] = mapped_column(JSON)
-    parse_status: Mapped[str] = mapped_column(
-        String(32), nullable=False, server_default="pending"
-    )
+    parse_status: Mapped[str] = mapped_column(String(32), nullable=False, server_default="pending")
     clarification_question: Mapped[str | None] = mapped_column(Text)
     llm_model: Mapped[str | None] = mapped_column(String(64))
     llm_latency_ms: Mapped[int | None] = mapped_column(Integer)
@@ -65,7 +61,7 @@ class RequestLog(Base):
     operator: Mapped[str | None] = mapped_column(String(64))
 
     # 一条请求最多产生一个流程实例(反问请求不产生);request_log_id 可空 → 0..1
-    process: Mapped["Process | None"] = relationship(
+    process: Mapped[Process | None] = relationship(
         primaryjoin="foreign(Process.request_log_id) == RequestLog.id",
         back_populates="request_log",
     )
@@ -80,9 +76,7 @@ class Process(UpdatedAt, Base):
     process_key: Mapped[str] = mapped_column(String(64), nullable=False)
     business_key: Mapped[str] = mapped_column(String(128), nullable=False)
     idempotency_key: Mapped[str] = mapped_column(String(160), nullable=False, unique=True)
-    status: Mapped[str] = mapped_column(
-        String(32), nullable=False, server_default="pending"
-    )
+    status: Mapped[str] = mapped_column(String(32), nullable=False, server_default="pending")
     input_params: Mapped[dict | None] = mapped_column(JSON)
     context: Mapped[dict | None] = mapped_column(JSON)
     result: Mapped[dict | None] = mapped_column(JSON)
@@ -92,16 +86,20 @@ class Process(UpdatedAt, Base):
     trace_id: Mapped[str | None] = mapped_column(String(64))
     started_at: Mapped[datetime | None] = mapped_column(DateTime)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime)
+    # 心跳: 执行中每步续, 协程失联则停; 判挂依据 无心跳超时
+    heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime)
+    # 操作人身份(OperatorContext 序列化): 失联重跑时重建身份
+    operator_context: Mapped[dict | None] = mapped_column(JSON)
 
-    request_log: Mapped["RequestLog | None"] = relationship(
+    request_log: Mapped[RequestLog | None] = relationship(
         primaryjoin="foreign(Process.request_log_id) == RequestLog.id",
         back_populates="process",
     )
-    steps: Mapped[list["ProcessStep"]] = relationship(
+    steps: Mapped[list[ProcessStep]] = relationship(
         primaryjoin="foreign(ProcessStep.process_id) == Process.id",
         back_populates="process",
     )
-    adapter_call_logs: Mapped[list["AdapterCallLog"]] = relationship(
+    adapter_call_logs: Mapped[list[AdapterCallLog]] = relationship(
         primaryjoin="foreign(AdapterCallLog.process_id) == Process.id",
         back_populates="process",
     )
@@ -119,25 +117,21 @@ class ProcessStep(UpdatedAt, Base):
     step_name: Mapped[str | None] = mapped_column(String(128))
     adapter: Mapped[str | None] = mapped_column(String(64))
     action: Mapped[str | None] = mapped_column(String(64))
-    status: Mapped[str] = mapped_column(
-        String(32), nullable=False, server_default="pending"
-    )
+    status: Mapped[str] = mapped_column(String(32), nullable=False, server_default="pending")
     input_params: Mapped[dict | None] = mapped_column(JSON)
     output_result: Mapped[dict | None] = mapped_column(JSON)
-    external_ref: Mapped[str | None] = mapped_column(String(128))
+    result_data: Mapped[Any | None] = mapped_column(JSON)
     error_message: Mapped[str | None] = mapped_column(Text)
     duration_ms: Mapped[int | None] = mapped_column(Integer)
-    compensation_status: Mapped[str] = mapped_column(
-        String(32), nullable=False, server_default="none"
-    )
+    compensation_status: Mapped[str] = mapped_column(String(32), nullable=False, server_default="none")
     started_at: Mapped[datetime | None] = mapped_column(DateTime)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime)
 
-    process: Mapped["Process"] = relationship(
+    process: Mapped[Process] = relationship(
         primaryjoin="foreign(ProcessStep.process_id) == Process.id",
         back_populates="steps",
     )
-    adapter_call_logs: Mapped[list["AdapterCallLog"]] = relationship(
+    adapter_call_logs: Mapped[list[AdapterCallLog]] = relationship(
         primaryjoin="foreign(AdapterCallLog.step_execution_id) == ProcessStep.id",
         back_populates="step",
     )
@@ -166,11 +160,11 @@ class AdapterCallLog(Base):
     credential_source: Mapped[str | None] = mapped_column(String(64))  # 凭证来源
 
     # process_id / step_execution_id 均可空:部分调用不在流程上下文内(如健康检查)
-    process: Mapped["Process | None"] = relationship(
+    process: Mapped[Process | None] = relationship(
         primaryjoin="foreign(AdapterCallLog.process_id) == Process.id",
         back_populates="adapter_call_logs",
     )
-    step: Mapped["ProcessStep | None"] = relationship(
+    step: Mapped[ProcessStep | None] = relationship(
         primaryjoin="foreign(AdapterCallLog.step_execution_id) == ProcessStep.id",
         back_populates="adapter_call_logs",
     )
@@ -203,9 +197,7 @@ class WorkflowRole(Base):
     """
 
     __tablename__ = "workflow_role"
-    __table_args__ = (
-        UniqueConstraint("workflow_name", "role", name="uk_workflow_role"),
-    )
+    __table_args__ = (UniqueConstraint("workflow_name", "role", name="uk_workflow_role"),)
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     workflow_name: Mapped[str] = mapped_column(String(64), nullable=False)

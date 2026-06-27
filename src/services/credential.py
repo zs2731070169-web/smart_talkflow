@@ -1,4 +1,5 @@
 """凭证抽象:把操作人打包成下游可识别的「代签委托书」。"""
+
 from __future__ import annotations
 
 import hashlib
@@ -34,8 +35,7 @@ class CredentialProvider(Protocol):
     operator + nonce + 时间戳变化),并保证服务账号 token 与签名密钥不外泄。
     """
 
-    async def resolve(self, operator: OperatorContext | None) -> Credential:
-        ...
+    async def resolve(self, operator: OperatorContext | None) -> Credential: ...
 
 
 class DefaultCredentialProvider:
@@ -57,9 +57,9 @@ class DefaultCredentialProvider:
 
 
 def _build_agent_headers(
-        api_key: str,
-        delegation_secret: str,
-        operator: OperatorContext | None,
+    api_key: str,
+    delegation_secret: str,
+    operator: OperatorContext | None,
 ) -> dict[str, str]:
     """代签请求头。
 
@@ -82,13 +82,15 @@ def _build_agent_headers(
     # 签名加密计算,唯一认证
     signature = hmac.new(delegation_secret.encode(), raw.encode(), hashlib.sha256).hexdigest()
 
-    headers.update({
-        "tenant-id": operator.tenant_id,
-        "X-Operator-Userid": operator.user_id,
-        "X-Agent-Signature": signature,
-        "X-Agent-Timestamp": timestamp,
-        "X-Agent-Nonce": nonce, # 一次性随机数
-    })
+    headers.update(
+        {
+            "tenant-id": operator.tenant_id,
+            "X-Operator-Userid": operator.user_id,
+            "X-Agent-Signature": signature,
+            "X-Agent-Timestamp": timestamp,
+            "X-Agent-Nonce": nonce,  # 一次性随机数
+        }
+    )
     return headers
 
 

@@ -1,7 +1,5 @@
-"""适配层统一抽象。
+"""适配层统一抽象。所有面向外部业务系统的适配器均继承"""
 
-所有面向外部业务系统(OA / 邮箱 / CRM)的适配器均继承 :class:`BaseAdapter`
-"""
 from __future__ import annotations
 
 import time
@@ -13,22 +11,23 @@ import httpx
 from sqlalchemy.exc import SQLAlchemyError
 
 from infra import http
+from infra.database import db_session
 from infra.exceptions import (
     ApiException,
+    BadGatewayException,
     BadRequestException,
-    UnauthorizedException,
-    ForbiddenException,
-    NotFoundException,
     ConflictException,
-    ValidationException,
+    ForbiddenException,
+    GatewayTimeoutException,
+    NotFoundException,
     RateLimitException,
     ServerErrorException,
-    BadGatewayException,
     ServiceUnavailableException,
-    GatewayTimeoutException,
+    UnauthorizedException,
+    ValidationException,
 )
-from infra.database import db_session
 from infra.logger import setup_logging
+from orchestrator.workflow_engine import StepResult
 from repository.models import AdapterCallLog
 from runtime.context import get_operator, get_process_id, get_step_id
 from services.credential import CredentialProvider, default_credential_provider
@@ -48,7 +47,7 @@ _STATUS_EXCEPTIONS: dict[int, type[ApiException]] = {
     500: ServerErrorException,
     502: BadGatewayException,
     503: ServiceUnavailableException,
-    504: GatewayTimeoutException
+    504: GatewayTimeoutException,
 }
 
 
@@ -65,8 +64,8 @@ class AdapterRequest:
     action: str
     method: str
     path: str
-    payload: dict[str, Any] | None = None # JSON body参数
-    params: dict | None = None # query参数
+    payload: dict[str, Any] | None = None  # JSON body参数
+    params: dict | None = None  # query参数
 
 
 @dataclass(frozen=True)
@@ -122,12 +121,9 @@ class BaseAdapter(ABC):
     ):
         self.base_url = base_url
         # 凭证默认按 target_system 自动加载服务账号; 也可显式注入覆盖。
-        self.credential_provider = (credential_provider or default_credential_provider(self.target_system))
+        self.credential_provider = credential_provider or default_credential_provider(self.target_system)
 
-    async def _call_action(
-            self,
-            request: AdapterRequest
-    ) -> AdapterResponse:
+    async def _call_action(self, request: AdapterRequest) -> AdapterResponse:
         """统一调用入口。
 
         :param request 适配器
@@ -187,42 +183,26 @@ class BaseAdapter(ABC):
 
         duration = int((time.perf_counter() - started) * 1000)
         if error_message is None:
-            logger.info("[%s] %s %s -> %s (%dms)", self.target_system, request.action,
-                        request.method, http_status, duration)
+            logger.info(
+                "[%s] %s %s -> %s (%dms)", self.target_system, request.action, request.method, http_status, duration
+            )
         else:
-            logger.warning("[%s] %s %s -> %s (%dms) 失败: %s", self.target_system, request.action,
-                           request.method, http_status, duration, error_message)
+            logger.warning(
+                "[%s] %s %s -> %s (%dms) 失败: %s",
+                self.target_system,
+                request.action,
+                request.method,
+                http_status,
+                duration,
+                error_message,
+            )
 
-        # 请求参数落库, 用于审计
+        # 请求参数快照(供审计留痕;落库由 step_call 统一做)
         traced_payload: dict[str, Any] = {}
         if request_payload:
             traced_payload["body"] = request_payload
         if request_params:
             traced_payload["params"] = request_params
-
-        # 落库审计:每次下游 HTTP 调用一条留痕(operator/tenant/credential/trace/process 关联)。
-        # 落库失败只记日志、不影响主流程(下游调用结果已拿到)。
-        try:
-            async with db_session() as session:
-                session.add(AdapterCallLog(
-                    process_id=get_process_id(),
-                    step_execution_id=get_step_id(),
-                    adapter=self.adapter_name,
-                    target_system=self.target_system,
-                    action=request.action,
-                    method=request.method,
-                    http_status=http_status,
-                    request_payload=traced_payload,
-                    response_payload=response_payload,
-                    error_message=error_message,
-                    duration_ms=duration,
-                    trace_id=get_trace_id(),
-                    operator_id=operator.user_id if operator else None,
-                    tenant_id=operator.tenant_id if operator else None,
-                    credential_source="service_account_delegated" if operator else None,
-                ))
-        except SQLAlchemyError:
-            logger.exception("落库 AdapterCallLog 失败(action=%s)", request.action)
 
         return AdapterResponse(
             adapter=self.adapter_name,
@@ -241,10 +221,48 @@ class BaseAdapter(ABC):
             credential_source="service_account_delegated" if operator else None,
         )
 
+    async def step_call(self, request: AdapterRequest) -> StepResult:
+        """_call_action + 转 StepResult(供 workflow engine 的 Step.func 用)。
+
+        adapter 层负责 AdapterResponse → StepResult 转换(引擎不认 AdapterResponse)。
+        """
+        resp = await self._call_action(request)
+
+        # 落库审计(每次下游 HTTP 调用一条留痕;落库失败只记日志,不影响主流程)
+        try:
+            async with db_session() as session:
+                session.add(
+                    AdapterCallLog(
+                        process_id=get_process_id(),
+                        step_execution_id=get_step_id(),
+                        adapter=resp.adapter,
+                        target_system=resp.target_system,
+                        action=resp.action,
+                        method=resp.method,
+                        http_status=resp.http_status,
+                        request_payload=resp.request_payload,
+                        response_payload=resp.response_payload,
+                        error_message=resp.error_message,
+                        duration_ms=resp.duration,
+                        trace_id=get_trace_id(),
+                        operator_id=resp.operator_id,
+                        tenant_id=resp.tenant_id,
+                        credential_source=resp.credential_source,
+                    )
+                )
+        except SQLAlchemyError:
+            logger.exception("落库 AdapterCallLog 失败(action=%s)", resp.action)
+
+        return StepResult(
+            ok=not resp.is_error,
+            data=resp.result.data if resp.result else None,
+            error=resp.error_message,
+        )
+
     @abstractmethod
     def is_success(self, http_status: int, response_payload: dict) -> tuple[bool, str | None]:
         """判定本次调用是否业务成功,并给出失败原因"""
 
     @abstractmethod
     def extract_result(self, payload: dict) -> AdapterResult:
-        """从响应体提取结构化业务结果(含外部业务键 external_ref)"""
+        """从响应体提取结构化业务结果(data,作为步产出持久化)"""

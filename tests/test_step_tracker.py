@@ -8,6 +8,7 @@
 
     PYTHONPATH=src python -m unittest tests.test_step_recorder
 """
+
 import unittest
 from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -38,14 +39,11 @@ def _fake_db(*, captured=None, row=None):
 
 
 class StepRecorderTest(unittest.IsolatedAsyncioTestCase):
-
     async def test_create_step_inserts_running_placeholder(self):
         """create_step:插入一条 status=running 的 ProcessStep 占位。"""
         captured: list = []
         with patch("repository.step_tracker.db_session", _fake_db(captured=captured)):
-            await create_step(
-                100, 1, "submit_booking", "提交预订", "oa", "submit_booking", {"roomId": 1}
-            )
+            await create_step(100, 1, "submit_booking", "提交预订", "oa", "submit_booking", {"roomId": 1})
 
         self.assertEqual(len(captured), 1)
         step = captured[0]
@@ -62,14 +60,24 @@ class StepRecorderTest(unittest.IsolatedAsyncioTestCase):
         row = ProcessStep(id=1, status=StepStatus.RUNNING.value)
         with patch("repository.step_tracker.db_session", _fake_db(row=row)):
             await finish_step(
-                1, status=StepStatus.COMPLETED,
-                output_result={"booking_id": 123}, duration_ms=10,
+                1,
+                status=StepStatus.COMPLETED,
+                output_result={"booking_id": 123},
+                duration_ms=10,
             )
 
         self.assertEqual(row.status, StepStatus.COMPLETED.value)
         self.assertEqual(row.output_result, {"booking_id": 123})
         self.assertEqual(row.duration_ms, 10)
         self.assertIsNotNone(row.finished_at)
+
+    async def test_finish_step_writes_result_data(self):
+        """finish_step:把外部业务引用(如 bookingId)写入 process_step.result_data。"""
+        row = ProcessStep(id=1, status=StepStatus.RUNNING.value)
+        with patch("repository.step_tracker.db_session", _fake_db(row=row)):
+            await finish_step(1, status=StepStatus.COMPLETED, result_data=12345)
+        # result_data 落 JSON 列原样存(不做 str 化),与 yields 绑定值类型一致
+        self.assertEqual(row.result_data, 12345)
 
     async def test_update_compensation_sets_status(self):
         """update_compensation:标记 compensation_status(done / failed)。"""

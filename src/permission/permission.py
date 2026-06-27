@@ -6,6 +6,7 @@
 
 **无记录 = 全员可用**(返回空集,由 ``BaseWorkflow.is_allowed`` 据此放行)。
 """
+
 from __future__ import annotations
 
 import json
@@ -14,8 +15,8 @@ from sqlalchemy import select
 
 from conf.config import settings
 from infra.database import db_session
-from repository.models import WorkflowRole
 from infra.redis_client import get_redis
+from repository.models import WorkflowRole
 from runtime.context import OperatorContext
 
 
@@ -36,11 +37,7 @@ class WorkflowRoleChecker:
             return set(json.loads(workflow_roles))
 
         async with db_session() as session:
-            rows = await session.execute(
-                select(WorkflowRole.role).where(
-                    WorkflowRole.workflow_name == workflow_name
-                )
-            )
+            rows = await session.execute(select(WorkflowRole.role).where(WorkflowRole.workflow_name == workflow_name))
             roles = {row[0] for row in rows}
 
         await redis.set(

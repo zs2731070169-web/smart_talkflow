@@ -79,7 +79,7 @@
 - 📝 **提示词三级降级**——远程 git 仓库 > 自定义 > 内置默认,任一来源失败自动降级,支持提示词热更新与版本化。
 - 🔍 **全链路 Trace ID**——每条请求生成唯一 `trace_id`,贯穿日志、数据库记录、对外 HTTP 调用头,出问题可像"查案"一样还原现场。
 - 🧱 **一次调用一条留痕**——适配器把下游真实 HTTP 状态码归一为业务异常,但**不向上抛**,而是结构化为 `AdapterResponse` 落库,保证审计完整性。
-- 🧱 **声明式 Saga 补偿 + 步骤留痕闭环**——每步可声明 `compensate`(会议室三步均声明 cancel),任一步失败由步骤执行引擎**逆序补偿**已成功步(整笔原子);每步经 `process_step` 落库(`running→completed/failed` + `compensation_status`),外部 HTTP 调用经 `step_id` 关联到所属步,「凭一个 operator 串联该用户所有下游调用」。
+- 🧱 **generator 闭包补偿 + 步骤留痕闭环**——业务用 `create()` generator 声明 `yield step(...)`,失败时引擎 `gen.throw(Compensate)` 触发业务 `except Compensate` yield 补偿步(用闭包变量,无需命名产出);每步经 `process_step` 落库(`running→completed/failed`),外部 HTTP 调用经 `step_id` 关联到所属步。
 - 🐳 **一键基础设施**——`docker compose up` 即起 MySQL 8 + Redis 7,容器首次启动自动建表,本地零配置。
 
 ## 架构总览
@@ -96,7 +96,7 @@ graph TD
         RT["Runtime 每请求执行<br/>装配请求级上下文"]
         AGENT["IntentParser<br/>意图解析 + 缺参反问"]
         ORCH["WorkflowDispatcher<br/>权限 → 校验 → 幂等 → 执行"]
-        IDEM["幂等控制器<br/>状态机 + 重试计数"]
+        IDEM["幂等控制器<br/>Status + is_new"]
         ADP["适配层 adapters"]
         CRED["代签凭证<br/>服务账号 + operator HMAC"]
     end
@@ -129,7 +129,7 @@ graph TD
 
 ```
 用户输入 → request_logs(记录意图解析 / 缺参反问)
-         → process(幂等状态机:running → completed / failed / reject)
+         → process(幂等状态机:running → completed / failed)
             └─ process_step × N(submit_booking / approve_booking / update_use_status)
                  └─ adapter_call_logs × N(每次外部 HTTP 调用 + 代签操作人留痕)
          → audit_logs(谁、在何时、对什么、做了什么)
@@ -143,20 +143,20 @@ graph TD
 | 阶段 | 主题 | 核心交付 | 状态 |
 |:---:|---|---|:---:|
 | **1** | **MVP——同步单流程硬跑通** | 同进程内跑通"一句话预订会议室":认证 + LLM 解析 + 幂等 + 硬编码编排(提交→审批→更新状态)+ SSE 流式 | 🚧 开发中 |
-| **2** | **配置化与解耦** | YAML 驱动流程定义(watchdog 热加载)+ 适配层拆为独立 FastAPI 微服务 + 通用 WorkflowEngine | 📋 规划中 |
+| **2** | **配置化与解耦** | 流程编排深化(generator 编码层演进)+ 适配层独立部署探索 | 📋 规划中 |
 | **3** | **工具标准化** | 适配层暴露标准 `GET /tools` + `POST /invoke`,编排层经 `ToolRegistry` 工具注册中心统一发现与调用 | 📋 规划中 |
 | **4** | **长程任务可靠性** | 异步调度 + 事件驱动恢复 + 人工审批节点 + Saga 补偿引擎 + 超时扫描 | 📋 规划中 |
 
-**阶段一当前进度**:基础设施层(DB/HTTP/日志/异常/Redis)、认证层(JWKS/SSO)、编排层(注册器 + 调度器 + 步骤执行引擎 + 幂等状态机)、**配置化 RBAC 权限层**(`workflow_role` + Redis 缓存)、**`process_step` 步骤留痕闭环 + 声明式 Saga 补偿**、OA 适配器(含代签:api-key 哈希比对 + nonce 防重放 + 恒定时间验签)、会议室预订流程、SSE 流式管线均已落地。**当前缺口**是意图解析核心 `IntentParser.run()`(尚为骨架)——它补齐后,端到端「自然语言 → 自动执行」才算闭环;`WorkflowDispatcher` 已就绪但尚未接入主链路。崩溃自动恢复(心跳存活 + 重跑)属后续方向,方案见 `SSD/流程崩溃自动恢复落地计划.md`(**设计阶段,代码未实现**)。
+**阶段一当前进度**:基础设施层(DB/HTTP/日志/异常/Redis)、认证层(JWKS/SSO)、编排层(**generator 工作流引擎** `workflow_engine.py`(drive/create/_exec_step/compensate/replay_steps)+ dispatcher + 幂等 `Status(StrEnum)` + is_new)、**配置化 RBAC 权限层**、**`process_step` 步骤留痕闭环 + generator 闭包补偿**、OA 适配器(`step_call` 转 `StepResult` + 代签)、会议室预订流程(`create()` generator)、SSE 流式管线均已落地。**崩溃自动恢复已落地**(`downgrade.py` handle_processes:replay + 补偿,不重跑 + heartbeat watchdog)。**端到端链路已跑通**(`test_dispatcher_e2e.py`:dispatcher → engine → adapter mock → MySQL)。**当前缺口**是意图解析核心 `IntentParser.run()`(LLM 调用仍为骨架)。
 
 **各阶段验收标准**(摘要):
 
 - **阶段 1**:一句"帮我订会议室"30 秒内成功回复;重复请求不重复预订;全程可凭 trace_id 还原。
-- **阶段 2**:新增"离职流程"只需加一个 YAML 文件,零 Python 改动;热加载 < 5 秒。
-- **阶段 3**:适配层暴露标准 `GET /tools` 与 `POST /invoke`,可用 curl/Postman 直接调试;`ToolRegistry` 启动扫描并缓存工具目录,加载期即可校验 YAML 引用一致性。
+- **阶段 2**:新增"离职流程"只需加一个 workflow 类,零底座改动。
+- **阶段 3**:适配层暴露标准 `GET /tools` 与 `POST /invoke`,可用 curl/Postman 直接调试;`ToolRegistry` 启动扫描并缓存工具目录,加载期即可校验工具引用一致性。
 - **阶段 4**:长程任务"提交即返回",编排层重启后能从 WAITING 状态恢复;失败自动补偿或告警。
 
-> 完整设计文档见 [`SSD/`](./SSD/):总纲《传统业务系统接入 Agent 落地计划 v1.0.md》、《用户认证与操作权限控制落地计划.md》、《流程崩溃自动恢复落地计划.md》(心跳存活检测 + 崩溃自动重跑,**设计阶段、代码未实现**)。
+> 完整设计文档见 [`SSD/`](./SSD/):引擎总纲《工作流引擎设计方案.md》(generator 引擎:drive/create/_exec_step/compensate/replay_steps)、《用户认证与操作权限控制落地计划.md》、《流程崩溃自动恢复落地计划.md》(心跳存活检测 + 失联降级补偿,**已落地**)。
 
 ## 技术栈
 
@@ -200,18 +200,20 @@ smart_talkflow/
 │   │   ├── deps.py               # ✅ 认证依赖(开发态请求头 / 生产态 SSO)
 │   │   └── schema.py             # ✅ 请求/响应 DTO(ChatRequest)
 │   ├── orchestrator/             # 编排层
-│   │   ├── base.py               # ✅ BaseWorkflow(声明式 steps)+ WorkflowRegistry
-│   │   ├── workflow_engine.py    # ✅ 步骤执行引擎(forward + 逆序 compensate + run_steps)
-│   │   ├── dispatcher.py         # ✅ WorkflowDispatcher(权限→校验→幂等→执行→状态机)
-│   │   ├── idempotency.py        # ✅ 流程级幂等(状态机 + 重试计数,纯逻辑层)
+│   │   ├── base.py               # ✅ BaseWorkflow(create generator)+ WorkflowRegistry
+│   │   ├── workflow_engine.py    # ✅ generator 引擎(drive/create/_exec_step/compensate/replay_steps)
+│   │   ├── dispatcher.py         # ✅ execute(认证→权限→幂等→drive→finalize)
+│   │   ├── downgrade.py          # ✅ 失联降级(handle_processes:replay+补偿,不重跑)
+│   │   ├── idempotency.py        # ✅ 流程级幂等(Status StrEnum + is_new)
 │   │   ├── resolver.py           # 🚧 身份补全(查 HR 主数据、重名反问)
 │   │   └── workflow/
-│   │       └── meeting_room.py   # ✅ 会议室预订流程(提交→审批→更新状态,三步均带补偿)
+│   │       └── meeting_room.py   # ✅ 会议室预订(create generator:try yield step / except Compensate cancel)
 │   ├── runtime/                  # 请求级执行上下文
 │   │   ├── context.py            # ✅ OperatorContext / RequestContext(ContextVar)
+│   │   ├── heartbeat.py          # ✅ 心跳看门狗(周期调 handle_processes)
 │   │   └── runner.py             # ✅ 启动装配工厂 + 每请求 Runtime.run(SSE)
 │   ├── adapters/                 # 适配层(封装传统系统 HTTP 调用 + 代签 + 留痕)
-│   │   ├── base.py               # ✅ BaseAdapter(错误码归一 + 结构化 AdapterResponse 留痕)
+│   │   ├── base.py               # ✅ BaseAdapter(_call_action HTTP + step_call 转 StepResult + 落 AdapterCallLog)
 │   │   ├── oa_adapter/           # ✅ OA 域(oa_client 聚合 + 会议室预订 adapter)
 │   │   ├── crm_adapter/          # 🚧 CRM 客户端骨架
 │   │   ├── ecs_adapter/          # 🚧 ECS 客户端骨架
@@ -239,7 +241,7 @@ smart_talkflow/
 ├── db/
 │   ├── smart_talkflow_init.sql   # 5 张平台表 + workflow_role(RBAC)建表脚本(容器首次启动自动执行)
 │   └── schema_diagram.md         # 数据库 ER 关系图与设计说明
-├── SSD/                          # 系统设计文档(总纲 v1.0 + 认证权限 + 流程崩溃恢复[设计阶段])
+├── SSD/                          # 系统设计文档(工作流引擎设计 + 认证权限 + 流程崩溃恢复[已落地])
 ├── docker-compose.yml            # MySQL 8 + Redis 7 一键编排
 ├── pyproject.toml                # uv 项目定义与依赖
 └── .env.example                  # 环境变量模板
@@ -263,7 +265,7 @@ smart_talkflow/
 
 - **已完成**(completed):直接短路返回历史结果。
 - **进行中**(running):拒绝并发重入。
-- **失败**(failed):按 `attempt` 重试计数放行重跑;超 `max_retry` 则转为 `reject` 永久拒绝。
+- **失败**(failed):交上层决策(降级补偿或人工),幂等层不再累加计数。
 - **首次**(未命中):插入 `running` 占位,放行执行。
 
 数据库用 `UNIQUE(process_key, business_key)` 做最终兜底,并发冲突靠唯一索引拦截后回查。
@@ -475,7 +477,7 @@ docker compose up -d     # 重新初始化,重新执行建表脚本
 - 💡 讨论架构与路线图 → 阅读 [`SSD/`](./SSD/) 下的设计文档后发表意见
 - 🔧 提交代码 → Fork → 分支开发 → PR(请确保不破坏现有基础设施层自测)
 
-**特别欢迎的方向**:`IntentParser` 意图解析器的落地实现、身份补全 `resolver`、各传统系统适配器(邮箱 / CRM / ERP)的实现,以及阶段二的 YAML 流程引擎设计。
+**特别欢迎的方向**:`IntentParser` 意图解析器的落地实现、身份补全 `resolver`、各传统系统适配器(邮箱 / CRM / ERP)的实现,以及阶段二的流程编排深化。
 
 ## 协议
 

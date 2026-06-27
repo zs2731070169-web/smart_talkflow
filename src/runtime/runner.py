@@ -17,10 +17,12 @@
 LLM client / DB 引擎 / redis / credential / OAClient 等基础设施目前为模块级单例,
 parser / workflow 按需引用;后续可逐步收拢到本工厂统一装配注入。
 """
+
 from __future__ import annotations
 
 import json
-from typing import Any, AsyncIterator, Literal, TypeAlias
+from collections.abc import AsyncIterator
+from typing import Any, Literal
 
 from pydantic import BaseModel
 
@@ -71,9 +73,7 @@ class UnknownSseEvent(BaseModel):
 
 
 #: SSE 事件联合类型
-SseEvent: TypeAlias = (
-    TextSseEvent | ToolStartedSseEvent | ToolCompletedSseEvent | UnknownSseEvent
-)
+type SseEvent = TextSseEvent | ToolStartedSseEvent | ToolCompletedSseEvent | UnknownSseEvent
 
 
 def _serialize_event(event: StreamEvent) -> SseEvent:
@@ -83,22 +83,24 @@ def _serialize_event(event: StreamEvent) -> SseEvent:
     if isinstance(event, ToolExecutionStarted):
         return ToolStartedSseEvent(tool=event.tool_name, input=event.tool_input)
     if isinstance(event, ToolExecutionCompleted):
-        return ToolCompletedSseEvent(
-            tool=event.tool_name, output=event.output, is_error=event.is_error
-        )
+        return ToolCompletedSseEvent(tool=event.tool_name, output=event.output, is_error=event.is_error)
     return UnknownSseEvent()
 
 
 class Runtime:
     """运行时:持有进程级组件,每请求执行编排。"""
 
-    def __init__(self, parser: IntentParser, dispatcher: WorkflowDispatcher) -> None:
-        self._parser = parser # 解析器
-        self._dispatcher = dispatcher # 分发器
+    def __init__(
+        self,
+        parser: IntentParser,
+        dispatcher: WorkflowDispatcher,
+        registry: WorkflowRegistry,
+    ) -> None:
+        self._parser = parser  # 解析器
+        self._dispatcher = dispatcher  # 分发器
+        self._registry = registry  # 工作流注册器
 
-    async def run(
-        self, operator: OperatorContext, user_input: str
-    ) -> AsyncIterator[str]:
+    async def run(self, operator: OperatorContext, user_input: str) -> AsyncIterator[str]:
         """构建请求级上下文 → 编排执行,流式产出 SSE ``data:`` 行。
 
         1. 构建运行时用户上下文 RequestContext;
@@ -109,19 +111,21 @@ class Runtime:
         context = RequestContext(operator=operator, trace_id=new_trace_id())
         set_request_context(context)
 
-        messages = [
-            ConversationMessage(role="user", content=[TextBlock(text=user_input)])
-        ]
+        messages = [ConversationMessage(role="user", content=[TextBlock(text=user_input)])]
 
         async for event in await self._parser.run(context, messages):
             sse = _serialize_event(event)
             yield f"data: {json.dumps(sse.model_dump(), ensure_ascii=False)}\n\n"
+
+    @property
+    def registry(self) -> WorkflowRegistry:
+        return self._registry
 
 
 def build_runtime() -> Runtime:
     """装配工厂:启动时调用一次,组装进程级组件并接好依赖。"""
     registry = WorkflowRegistry()
     registry.register(MeetingRoomBookingWorkflow())
-    dispatcher = WorkflowDispatcher(registry)
-    parser = IntentParser()
-    return Runtime(parser=parser, dispatcher=dispatcher)
+    dispatcher = WorkflowDispatcher()
+    parser = IntentParser(registry, dispatcher)
+    return Runtime(parser=parser, dispatcher=dispatcher, registry=registry)

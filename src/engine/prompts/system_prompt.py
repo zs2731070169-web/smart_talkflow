@@ -6,6 +6,7 @@
 
 最终把「当前可用工作流」清单追加到提示词末尾,供主控 LLM 选择调用。
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -108,14 +109,10 @@ async def _run_git(*args: str, cwd: Path) -> None:
     )
     _, stderr = await proc.communicate()
     if proc.returncode != 0:
-        raise RuntimeError(
-            f"git {' '.join(args)} 失败:{stderr.decode(errors='ignore').strip()}"
-        )
+        raise RuntimeError(f"git {' '.join(args)} 失败:{stderr.decode(errors='ignore').strip()}")
 
 
-async def _fetch_remote_prompt(
-        repo_url: str, prompt_path: str, branch: str | None = None
-) -> str | None:
+async def _fetch_remote_prompt(repo_url: str, prompt_path: str, branch: str | None = None) -> str | None:
     """从远程 git 仓库拉取系统提示词文件。
 
     采用 clone-or-reset:本地缓存不存在则浅克隆,已存在则用远程版本强制覆盖本地(直接覆盖,不合并)。
@@ -145,7 +142,7 @@ async def _fetch_remote_prompt(
                 clone_args += ["--branch", branch]  # 克隆指定分支
             await _run_git(
                 *clone_args,
-                cwd=_PROMPT_REPO_DIR  # 工作目录设为_PROMPT_REPO_DIR,这样 git 才能在其中创建 repo_dir 这个新目录
+                cwd=_PROMPT_REPO_DIR,  # 工作目录设为_PROMPT_REPO_DIR,这样 git 才能在其中创建 repo_dir 这个新目录
             )
     except (RuntimeError, OSError) as e:
         logger.warning("拉取远程提示词仓库失败,降级使用本地提示词:%s", e)
@@ -160,9 +157,9 @@ async def _fetch_remote_prompt(
 
 
 async def build_system_prompt(
-        env: EnvironmentInfo,
-        *,
-        custom_prompt: str | None = None,
+    env: EnvironmentInfo,
+    *,
+    custom_prompt: str | None = None,
 ) -> str:
     """构建主控 LLM 的系统提示词。
 

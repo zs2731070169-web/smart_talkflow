@@ -8,6 +8,7 @@
     settings.mysql_host            # 读单个配置
     settings.mysql_conf            # 直接拿到拼好的 MySQL 连接串
 """
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -94,27 +95,44 @@ class Settings(BaseSettings):
     # 运维改配置后调 invalidate 立即生效,或等 TTL 过期
     workflow_role_cache_ttl: int = 300
 
+    # ---- 流程崩溃恢复(心跳存活检测 + 失联工作流自动重跑)----
+    process_heartbeat_timeout: int = 60  # 无心跳超时/秒(协程失联多久判挂)
+
+    process_recovery_interval: int = 20  # watchdog 扫描间隔秒
+
     # ---- 认证模式----
     auth_dev_mode: bool = True
 
     # ---- SSO(生产态:auth_dev_mode=False 时走 SSO/JWT)----
-    sso_issuer: str | None = None       # JWT iss 校验
+    sso_issuer: str | None = None  # JWT iss 校验
 
-    sso_jwks_uri: str | None = None     # JWKS 公钥端点
+    sso_jwks_uri: str | None = None  # JWKS 公钥端点
 
-    sso_audience: str | None = None     # JWT aud 校验
+    sso_audience: str | None = None  # JWT aud 校验
 
-    sso_jwks_cache_ttl: int = 3600      # JWKS redis 缓存秒数
+    sso_jwks_cache_ttl: int = 3600  # JWKS redis 缓存秒数
 
     # ---- 非空校验 ----
     @model_validator(mode="after")
     def _required_non_blank(self) -> Settings:
         if not (
-                self.llm_model and self.llm_provider and self.llm_base_url and self.llm_api_key and self.llm_timeout and self.llm_temperature):
+            self.llm_model
+            and self.llm_provider
+            and self.llm_base_url
+            and self.llm_api_key
+            and self.llm_timeout
+            and self.llm_temperature
+        ):
             raise ValueError("llm 配置不能为空")
 
         if not (
-                self.mysql_host and self.mysql_database and self.mysql_user and self.mysql_password and self.sql_log and self.tz):
+            self.mysql_host
+            and self.mysql_database
+            and self.mysql_user
+            and self.mysql_password
+            and self.sql_log
+            and self.tz
+        ):
             raise ValueError("mysql 配置不能为空")
 
         # 启用远程仓库拉取时仓库地址必填;分支与相对路径保持可选
@@ -128,9 +146,7 @@ class Settings(BaseSettings):
             raise ValueError("下游系统认证配置不能为空:oa_api_key / oa_delegation_secret")
 
         # 生产态(auth_dev_mode=False)走 SSO/JWT:issuer / jwks_uri / redis_url 必填
-        if not self.auth_dev_mode and not (
-            self.sso_issuer and self.sso_jwks_uri and self.redis_url
-        ):
+        if not self.auth_dev_mode and not (self.sso_issuer and self.sso_jwks_uri and self.redis_url):
             raise ValueError("生产态(auth_dev_mode=False)必须配置:sso_issuer / sso_jwks_uri / redis_url")
         return self
 

@@ -4,7 +4,7 @@ from typing import Any
 
 @dataclass(frozen=True)
 class AssistantTextDelta:
-    """llm 输出文本片段 """
+    """llm 输出文本片段"""
 
     text: str
 

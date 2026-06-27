@@ -8,6 +8,7 @@
 
     python -m unittest tests.test_config
 """
+
 import unittest
 
 from conf.config import settings

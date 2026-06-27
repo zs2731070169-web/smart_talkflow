@@ -1,29 +1,16 @@
-"""工作流抽象与注册器。
+"""工作流抽象与注册器"""
 
-步骤执行引擎(``StepContext`` / ``WorkflowStep`` / ``DoneStep`` / ``StepMeta`` /
-:func:`run_steps`)见 :mod:`orchestrator.workflow_engine`;:meth:`BaseWorkflow.execute`
-委托它驱动顺序执行 + 留痕 + 失败逆序补偿。本模块只定义「workflow 是什么」
-(抽象基类 + 注册器 + 上下文 / 结果 DTO)。
-"""
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Generator
 from dataclasses import field
 from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel
 
-from runtime.context import get_process_id
-
 if TYPE_CHECKING:
-    from orchestrator.workflow_engine import WorkflowStep
-    from orchestrator.workflow_engine import run_steps
-
-
-class WorkflowExecutionContext(BaseModel):
-    """执行工具时使用的上下文"""
-
-    metadata: dict[str, Any] = field(default_factory=dict)
+    from orchestrator.workflow_engine import Step
 
 
 class WorkflowResult(BaseModel):
@@ -36,30 +23,25 @@ class WorkflowResult(BaseModel):
 
 
 class BaseWorkflow(ABC):
-    """工作流基类(步骤式编排):子类声明 steps,execute 委托 workflow_engine 驱动。"""
+    """工作流基类(generator 步骤编排):子类实现 create generator,execute 委托 drive 驱动。"""
 
     name: str
     description: str
     input_model: type[BaseModel]
 
     @abstractmethod
-    def steps(self, arguments: BaseModel, context: WorkflowExecutionContext) -> list[WorkflowStep]:
-        """声明工作流的步骤序列(按 step_no 顺序执行)
-
-        :param arguments: 业务参数
-        :param context: 外部传入的执行上下文
-        """
+    def create(self, arguments: BaseModel) -> Generator[Step, Any, str]:
+        """声明工作流:yield step(...) 声明步骤,return 最终文案, 补偿写在 ``except Compensate`` 分支"""
 
     @abstractmethod
     def business_key(self, arguments: BaseModel) -> str | None:
         """从入参提取业务唯一键(供流程级幂等校验使用)。"""
 
-    async def execute(
-            self, arguments: BaseModel, context: WorkflowExecutionContext
-    ) -> WorkflowResult:
-        """通用驱动:委托 workflow_engine 顺序执行声明的步骤,失败逆序补偿"""
-        from orchestrator.workflow_engine import run_steps
-        return await run_steps(get_process_id(), self.steps(arguments, context))
+    async def execute(self, arguments: BaseModel) -> WorkflowResult:
+        """通用驱动:委托 workflow_engine.drive 驱动"""
+        from orchestrator.workflow_engine import drive
+
+        return await drive(self, arguments)
 
     def to_api_schema(self) -> dict[str, Any]:
         """将工作流定义结构序列化为API格式."""

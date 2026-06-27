@@ -9,6 +9,7 @@
 
     python -m unittest tests.test_http
 """
+
 import unittest
 
 from infra.http import close, http_get

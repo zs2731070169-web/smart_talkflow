@@ -6,13 +6,12 @@
    - :func:`build_idempotency_key`:空值校验 / 超长截断 / 边界长度
    - :class:`IdempotencyChecker` 构造校验
    - :meth:`IdempotencyChecker._check_process`:命中已存在记录后的状态分流
-     (completed / running / reject / failed / None / pending)。该方法是
+     (completed / running / failed / None / pending)。该方法是
      ``staticmethod``,接收普通 :class:`Process` 对象即可判定,无需落库。
 
 2. **集成层**(``IsolatedAsyncioTestCase``,依赖真实 MySQL)
    - :meth:`IdempotencyChecker.check` 全流程:未命中 -> NEW 落库、命中各状态分流
-   - 状态迁移方法 :meth:`completed` / :meth:`failed` / :meth:`reject` /
-     :meth:`increment_attempt` 及其幂等保护
+   - 状态迁移方法 :meth:`completed` / :meth:`failed` 及其幂等保护
    - 并发同 key 触发 ``process.idempotency_key`` 唯一索引 ``IntegrityError``,
      验证「flush 冲突 -> rollback -> 回查」兜底分支
 
@@ -25,6 +24,7 @@
     PYTHONPATH=src python -m unittest tests.test_idempotency
     PYTHONPATH=src python -m unittest tests.test_idempotency.IdempotencyIntegrationTest
 """
+
 import asyncio
 import unittest
 
@@ -34,9 +34,9 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 import infra.database as _db
 from infra.database import db_session
 from orchestrator.idempotency import (
-    Action,
     IdempotencyChecker,
     IdempotencyCheckRequest,
+    Status,
     build_idempotency_key,
 )
 from repository.models import Process
@@ -133,47 +133,37 @@ class CheckProcessStateTest(unittest.TestCase):
     def test_none_returns_reject(self):
         """并发 IntegrityError 回查仍未命中 -> 拒绝执行。"""
         decision = IdempotencyChecker._check_process(None)
-        self.assertEqual(decision.action, Action.REJECT)
+        self.assertFalse(decision.is_new)
         self.assertIsNone(decision.process)
 
     def test_completed_returns_completed_with_result(self):
         """命中 completed -> 返回历史结果,跳过重复执行。"""
         process = self._make_process("completed", result={"emp_id": "9527"})
         decision = IdempotencyChecker._check_process(process)
-        self.assertEqual(decision.action, Action.COMPLETED)
+        self.assertEqual(decision.process.status, Status.COMPLETED)
         self.assertEqual(decision.complete_result, {"emp_id": "9527"})
 
     def test_running_returns_reject(self):
         """命中 running(流程进行中)-> 拒绝并发重入。"""
         decision = IdempotencyChecker._check_process(self._make_process("running"))
-        self.assertEqual(decision.action, Action.REJECT)
-
-    def test_reject_returns_reject_with_error_and_context(self):
-        """命中 reject(失败次数过多)-> 拒绝并回带 error / context 供人工处理。"""
-        process = self._make_process(
-            "reject", error_message="boom", context={"attempt": 3}
-        )
-        decision = IdempotencyChecker._check_process(process)
-        self.assertEqual(decision.action, Action.REJECT)
-        self.assertEqual(decision.error, "boom")
-        self.assertEqual(decision.context, {"attempt": 3})
+        self.assertEqual(decision.process.status, Status.RUNNING)
 
     def test_failed_returns_failed(self):
         """命中 failed -> 交上层决策是否重跑(不直接拒绝)。"""
         process = self._make_process("failed", error_message="boom")
         decision = IdempotencyChecker._check_process(process)
-        self.assertEqual(decision.action, Action.FAILED)
+        self.assertEqual(decision.process.status, Status.FAILED)
         self.assertEqual(decision.error, "boom")
 
     def test_pending_returns_reject(self):
         """pending 等其它中间态 -> 直接拒绝执行。"""
         decision = IdempotencyChecker._check_process(self._make_process("pending"))
-        self.assertEqual(decision.action, Action.REJECT)
+        self.assertEqual(decision.process.status, "pending")
 
     def test_unknown_status_returns_reject(self):
         """未知状态 -> 兜底拒绝。"""
         decision = IdempotencyChecker._check_process(self._make_process("whatever"))
-        self.assertEqual(decision.action, Action.REJECT)
+        self.assertEqual(decision.process.status, "whatever")
 
 
 # ============================================================================
@@ -185,9 +175,7 @@ async def _cleanup_business_keys(keys: set[str]) -> None:
         return
     async with db_session() as session:
         for key in keys:
-            await session.execute(
-                text("DELETE FROM process WHERE business_key = :k"), {"k": key}
-            )
+            await session.execute(text("DELETE FROM process WHERE business_key = :k"), {"k": key})
 
 
 async def _reset_engine_for_loop() -> None:
@@ -244,19 +232,15 @@ class IdempotencyIntegrationTest(unittest.IsolatedAsyncioTestCase):
 
     # ---- check():未命中 -> NEW ----
     async def test_first_check_returns_new_and_persists(self):
-        """首次 check 未命中 -> NEW,落库一条 running 记录,context.attempt=1。"""
+        """首次 check 未命中 -> NEW,落库一条 running 记录。"""
         checker = IdempotencyChecker("onboarding")
-        decision = await checker.check(
-            self._req(input_params={"name": "张三"}, trace_id="trace-1")
-        )
+        decision = await checker.check(self._req(input_params={"name": "张三"}, trace_id="trace-1"))
 
-        self.assertEqual(decision.action, Action.NEW)
+        self.assertTrue(decision.is_new)
         self.assertIsNotNone(decision.process)
         self.assertEqual(decision.process.status, "running")
-        # context 初始化 attempt=1
-        self.assertEqual(decision.process.context.get("attempt"), 1)
 
-        # 落库校验:另开会话查得到,字段写对
+        # 落库校验:另开会会话查得到,字段写对
         async with db_session() as session:
             row = await session.get(Process, decision.process.id)
             self.assertIsNotNone(row)
@@ -266,20 +250,20 @@ class IdempotencyIntegrationTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(row.idempotency_key, "onboarding_BK_test_first_check_returns_new_and_persists")
 
     async def test_first_check_preserves_user_context(self):
-        """调用方传入 context 时,attempt 在其基础上补齐,不覆盖已有键。"""
+        """调用方传入 context 时原样保留,不覆盖已有键。"""
         checker = IdempotencyChecker("onboarding")
         decision = await checker.check(self._req(context={"foo": "bar"}))
-        self.assertEqual(decision.process.context, {"foo": "bar", "attempt": 1})
+        self.assertEqual(decision.process.context, {"foo": "bar"})
 
     # ---- check():命中 running -> REJECT ----
     async def test_second_check_while_running_returns_reject(self):
         """同一 key 第二次 check(前一次仍在 running)-> 拒绝并发重入。"""
         checker = IdempotencyChecker("onboarding")
         first = await checker.check(self._req())
-        self.assertEqual(first.action, Action.NEW)
+        self.assertTrue(first.is_new)
 
         second = await checker.check(self._req())
-        self.assertEqual(second.action, Action.REJECT)
+        self.assertFalse(second.is_new)
         # 命中同一条记录
         self.assertEqual(second.process.id, first.process.id)
 
@@ -291,7 +275,7 @@ class IdempotencyIntegrationTest(unittest.IsolatedAsyncioTestCase):
         await IdempotencyChecker.completed(new_proc, {"emp_id": "9527"})
 
         decision = await checker.check(self._req())
-        self.assertEqual(decision.action, Action.COMPLETED)
+        self.assertEqual(decision.process.status, Status.COMPLETED)
         self.assertEqual(decision.complete_result, {"emp_id": "9527"})
 
     # ---- check():命中 failed -> FAILED ----
@@ -302,20 +286,8 @@ class IdempotencyIntegrationTest(unittest.IsolatedAsyncioTestCase):
         await IdempotencyChecker.failed(new_proc, "下游 OA 503")
 
         decision = await checker.check(self._req())
-        self.assertEqual(decision.action, Action.FAILED)
+        self.assertEqual(decision.process.status, Status.FAILED)
         self.assertEqual(decision.error, "下游 OA 503")
-
-    # ---- check():命中 reject -> REJECT ----
-    async def test_check_after_reject_returns_reject(self):
-        """reject() 后再 check -> REJECT(不可恢复,需人工)。"""
-        checker = IdempotencyChecker("onboarding")
-        new_proc = (await checker.check(self._req())).process
-        await IdempotencyChecker.failed(new_proc, "boom")
-        await IdempotencyChecker.reject(new_proc, "失败次数过多")
-
-        decision = await checker.check(self._req())
-        self.assertEqual(decision.action, Action.REJECT)
-        self.assertEqual(decision.error, "失败次数过多")
 
     # ---- check():空 business_key ----
     async def test_check_empty_business_key_raises(self):
@@ -368,35 +340,6 @@ class IdempotencyIntegrationTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(row.status, "failed")
             self.assertIsNone(row.result)
 
-    # ---- 状态迁移:reject 终态保护(_FROM_REJECT = {failed, running})----
-    async def test_reject_does_not_overwrite_completed(self):
-        """前驱状态约束:对 completed 记录调 reject() 应被跳过,
-        不得把「已成功」的任务改判为不可恢复。"""
-        checker = IdempotencyChecker("onboarding")
-        new_proc = (await checker.check(self._req())).process
-        await IdempotencyChecker.completed(new_proc, {"r": 1})
-        await IdempotencyChecker.reject(new_proc, "误判")
-
-        async with db_session() as session:
-            row = await session.get(Process, new_proc.id)
-            self.assertEqual(row.status, "completed")
-            self.assertEqual(row.result, {"r": 1})
-            self.assertIsNone(row.error_message)
-
-    async def test_reject_is_idempotent(self):
-        """重复 reject 不覆盖既有 error_message:reject 不在 _FROM_REJECT,
-        第二次 reject() 应被静默跳过。"""
-        checker = IdempotencyChecker("onboarding")
-        new_proc = (await checker.check(self._req())).process
-        await IdempotencyChecker.failed(new_proc, "boom")
-        await IdempotencyChecker.reject(new_proc, "失败次数过多")
-        await IdempotencyChecker.reject(new_proc, "再次拒绝(应被忽略)")
-
-        async with db_session() as session:
-            row = await session.get(Process, new_proc.id)
-            self.assertEqual(row.status, "reject")
-            self.assertEqual(row.error_message, "失败次数过多")
-
     # ---- 状态迁移:finished_at 终态收尾时间戳 ----
     async def test_terminal_transition_sets_finished_at(self):
         """推进终态后 finished_at 由 None 变非空,且不早于 started_at;
@@ -418,20 +361,6 @@ class IdempotencyIntegrationTest(unittest.IsolatedAsyncioTestCase):
             self.assertIsNotNone(row.finished_at)
             self.assertGreaterEqual(row.finished_at, started_at)
 
-    # ---- 状态迁移:increment_attempt 累加 ----
-    async def test_increment_attempt_accumulates(self):
-        """increment_attempt 每次把 context.attempt +1。"""
-        checker = IdempotencyChecker("onboarding")
-        new_proc = (await checker.check(self._req())).process
-        self.assertEqual(new_proc.context.get("attempt"), 1)
-
-        await IdempotencyChecker.increment_attempt(new_proc)
-        await IdempotencyChecker.increment_attempt(new_proc)
-
-        async with db_session() as session:
-            row = await session.get(Process, new_proc.id)
-            self.assertEqual(row.context.get("attempt"), 3)
-
     # ---- 并发兜底:同 key 并发 check ----
     async def test_concurrent_same_key_only_one_new(self):
         """两个协程并发对同一 key check:唯一索引保证恰好一个 NEW,
@@ -445,11 +374,8 @@ class IdempotencyIntegrationTest(unittest.IsolatedAsyncioTestCase):
             checker.check(req),
         )
 
-        actions = {first.action, second.action}
-        # 恰好一个 NEW
-        self.assertEqual(sum(1 for a in (first.action, second.action) if a == Action.NEW), 1)
-        # 另一个被拒绝(无论走 IntegrityError 回查还是直接命中 running)
-        self.assertEqual(actions, {Action.NEW, Action.REJECT})
+        # 恰好一个首次(is_new=True, NEW),另一个非首次(拒绝)
+        self.assertEqual(sum(1 for c in (first, second) if c.is_new), 1)
 
     # ---- 已知缺陷:FAILED 重跑链路缺失 ----
     @unittest.expectedFailure
@@ -466,11 +392,11 @@ class IdempotencyIntegrationTest(unittest.IsolatedAsyncioTestCase):
 
         # 第一次重入:FAILED(交上层决策)
         reentry = await checker.check(self._req())
-        self.assertEqual(reentry.action, Action.FAILED)
+        self.assertEqual(reentry.process.status, Status.FAILED)
 
         # 期望:上层决策重跑后,应能再次进入执行(NEW);实际仍为 FAILED
         retried = await checker.check(self._req())
-        self.assertEqual(retried.action, Action.NEW)
+        self.assertTrue(retried.is_new)
 
 
 if __name__ == "__main__":

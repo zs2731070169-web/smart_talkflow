@@ -1,65 +1,66 @@
-"""会议室预订工作流编排单测(声明式 Saga)。
+"""会议室预订工作流编排单测(声明式 call/ref/yields + 统一 compensate)。
 
-mock 下游 client 与 step_recorder(避免真实 yudao / DB),驱动 :meth:`BaseWorkflow.execute`
-验证:三步顺序执行、bookingId 经 ``ctx.results`` 流转、approve 失败逆序 ``cancel`` 补偿。
+mock 下游 client 与步骤留痕(避免真实 yudao / DB),驱动 BaseWorkflow.execute 验证:
+三步顺序执行、bookingId 经 ref 流转、approve 失败触发统一补偿 cancel。
 
-运行(项目根)::
+运行(项目根目录)::
 
     PYTHONPATH=src python -m unittest tests.test_meeting_room_workflow
 """
+
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from adapters.base import AdapterResponse, AdapterResult
-from orchestrator.base import WorkflowExecutionContext
-from repository.step_tracker import CompensationStatus
 from orchestrator.workflow.meeting_room import (
     MeetingRoomBookingInput,
     MeetingRoomBookingWorkflow,
 )
+from orchestrator.workflow_engine import StepResult
 from runtime.context import OperatorContext, RequestContext, set_request_context
 
 
 def _resp(action, *, is_error=False, data=None, error=None):
-    """构造最小 :class:`AdapterResponse`(``result.data`` 即业务结果)。"""
-    return AdapterResponse(
-        adapter="oa_adapter_meeting_room", target_system="oa",
-        action=action, method="PUT",
-        result=AdapterResult(data=data),
-        is_error=is_error, error_message=error, duration=1,
-    )
+    """构造 StepResult(mock adapter action 返回值)。"""
+    return StepResult(ok=not is_error, data=data, error=error)
 
 
 class MeetingRoomWorkflowTest(unittest.IsolatedAsyncioTestCase):
-    """会议室预订 execute:全成功 / 步骤失败触发逆序补偿。"""
+    """会议室预订 execute:全成功 / 步骤失败触发统一补偿。"""
 
     def _args(self) -> MeetingRoomBookingInput:
         return MeetingRoomBookingInput(
-            room_id=1, meeting_title="周会",
-            meeting_start_time="2026-06-24 10:00:00", meeting_end_time="2026-06-24 11:00:00",
-            moderator_id=10, use_status=1,
+            room_id=1,
+            meeting_title="周会",
+            meeting_start_time="2026-06-24 10:00:00",
+            meeting_end_time="2026-06-24 11:00:00",
+            moderator_id=10,
+            use_status=1,
         )
 
     async def asyncSetUp(self):
-        set_request_context(RequestContext(
-            operator=OperatorContext(user_id="9527", tenant_id="1", name="王五"),
-            process_id=100,
-        ))
+        set_request_context(
+            RequestContext(
+                operator=OperatorContext(user_id="9527", tenant_id="1", name="王五"),
+                process_id=100,
+            )
+        )
 
     async def asyncTearDown(self):
         set_request_context(None)
 
     async def _run(self, client_mock):
-        """mock step_recorder + client,跑一次 execute,返回 WorkflowResult。"""
-        with patch("orchestrator.workflow_engine.create_step", AsyncMock(return_value=1)), \
-             patch("orchestrator.workflow_engine.finish_step", AsyncMock()), \
-             patch("orchestrator.workflow_engine.update_compensation", AsyncMock()), \
-             patch("orchestrator.workflow.meeting_room.client", client_mock):
+        """mock 留痕 + client,跑一次 execute,返回 WorkflowResult。"""
+        with (
+            patch("orchestrator.workflow_engine.create_step", AsyncMock(return_value=1)),
+            patch("orchestrator.workflow_engine.finish_step", AsyncMock()),
+            patch("orchestrator.workflow_engine.flush_heartbeat", AsyncMock()),
+            patch("orchestrator.workflow.meeting_room.room_booking_adapter", client_mock),
+        ):
             wf = MeetingRoomBookingWorkflow()
-            return await wf.execute(self._args(), WorkflowExecutionContext())
+            return await wf.execute(self._args())
 
     async def test_all_steps_success(self):
-        """全成功:三步顺序执行,无补偿(cancel 不应被调用)。"""
+        """全成功:三步顺序执行,bookingId 经 ref 流转,无补偿(cancel 不调)。"""
         client = MagicMock()
         client.submit_booking = AsyncMock(return_value=_resp("submit_booking", data=123))
         client.approve_booking = AsyncMock(return_value=_resp("approve_booking", data=True))
@@ -69,53 +70,43 @@ class MeetingRoomWorkflowTest(unittest.IsolatedAsyncioTestCase):
         result = await self._run(client)
 
         self.assertFalse(result.is_error)
-        self.assertEqual(client.submit_booking.await_count, 1)
-        self.assertEqual(client.approve_booking.await_count, 1)
-        self.assertEqual(client.update_use_status.await_count, 1)
+        client.submit_booking.assert_awaited_once()
+        # bookingId 经 ref 流转:approve/update 收到 123
+        client.approve_booking.assert_awaited_once_with(booking_id=123)
+        client.update_use_status.assert_awaited_once_with(booking_id=123, use_status=1)
         # 全成功不触发补偿
         client.cancel_booking.assert_not_awaited()
 
     async def test_step2_failure_triggers_compensation(self):
-        """Step2(approve)失败:逆序 cancel 已成功的 submit 步(bookingId=123)。"""
+        """Step2(approve)失败:统一补偿 cancel 已成功的 submit 步(bookingId=123)。"""
         client = MagicMock()
         client.submit_booking = AsyncMock(return_value=_resp("submit_booking", data=123))
-        client.approve_booking = AsyncMock(
-            return_value=_resp("approve_booking", is_error=True, error="审批失败"))
+        client.approve_booking = AsyncMock(return_value=_resp("approve_booking", is_error=True, error="审批失败"))
         client.update_use_status = AsyncMock()
         client.cancel_booking = AsyncMock(return_value=_resp("cancel_booking", data=True))
 
         result = await self._run(client)
 
         self.assertTrue(result.is_error)
-        # submit 已成功 -> 补偿 cancel 其 bookingId(123)
+        client.approve_booking.assert_awaited_once_with(booking_id=123)
+        # 统一补偿:cancel(submit 绑定的 bookingId=123)
         client.cancel_booking.assert_awaited_once_with(123)
         # approve 失败后不应执行 update
         client.update_use_status.assert_not_awaited()
 
-    async def test_compensation_failure_marks_failed(self):
-        """补偿 cancel 自身失败:该步标 compensation_status=failed,流程仍返回 is_error。"""
+    async def test_compensation_failure_still_returns_error(self):
+        """补偿 cancel 自身失败:流程仍返回 is_error(补偿成败不改变流程失败结论)。"""
         client = MagicMock()
         client.submit_booking = AsyncMock(return_value=_resp("submit_booking", data=123))
-        client.approve_booking = AsyncMock(
-            return_value=_resp("approve_booking", is_error=True, error="审批失败"))
+        client.approve_booking = AsyncMock(return_value=_resp("approve_booking", is_error=True, error="审批失败"))
         client.update_use_status = AsyncMock()
         # cancel 返回失败
-        client.cancel_booking = AsyncMock(
-            return_value=_resp("cancel_booking", is_error=True, error="取消失败"))
+        client.cancel_booking = AsyncMock(return_value=_resp("cancel_booking", is_error=True, error="取消失败"))
 
-        # 不走 _run(其内部 patch 会覆盖 update_compensation),此处自己展开 patch
-        mock_comp = AsyncMock()
-        with patch("orchestrator.workflow_engine.create_step", AsyncMock(return_value=1)), \
-             patch("orchestrator.workflow_engine.finish_step", AsyncMock()), \
-             patch("orchestrator.workflow_engine.update_compensation", mock_comp), \
-             patch("orchestrator.workflow.meeting_room.client", client):
-            wf = MeetingRoomBookingWorkflow()
-            result = await wf.execute(self._args(), WorkflowExecutionContext())
+        result = await self._run(client)
 
         self.assertTrue(result.is_error)
         client.cancel_booking.assert_awaited_once_with(123)
-        # 补偿被调用,且因 cancel_resp.ok=False 标 FAILED
-        mock_comp.assert_awaited_once_with(1, CompensationStatus.FAILED)
 
 
 if __name__ == "__main__":
