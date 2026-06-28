@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from enum import Enum
+from enum import StrEnum
 
 from pydantic import BaseModel, Field
 
@@ -23,7 +23,7 @@ class MeetingRoomBookingInput(BaseModel):
     use_status: int = Field(default=1, description="最终使用状态(0待使用/1使用中/2已完成/3已取消)")
 
 
-class Steps(Enum):
+class Steps(StrEnum):
     """# 每一步的 step_key 和 step_name 常量"""
 
     SUBMIT_BOOKING = "提交预订"
@@ -55,18 +55,18 @@ class MeetingRoomBookingWorkflow(BaseWorkflow):
                 meeting_end_time=arguments.meeting_end_time,
                 creator=operator.user_id,
                 moderator_id=arguments.moderator_id,
-                name=Steps.SUBMIT_BOOKING.value,
+                name=Steps.SUBMIT_BOOKING,
             )
             yield step(
                 room_booking_adapter.approve_booking,
                 booking_id=booking_id,
-                name=Steps.APPROVE_BOOKING.value,
+                name=Steps.APPROVE_BOOKING,
             )
             yield step(
                 room_booking_adapter.update_use_status,
                 booking_id=booking_id,
                 use_status=arguments.use_status,
-                name=Steps.UPDATE_USE_STATUS.value,
+                name=Steps.UPDATE_USE_STATUS,
             )
             return f"已为您预订会议室:{arguments.meeting_title}(预订号 {booking_id})"
         except Compensate:

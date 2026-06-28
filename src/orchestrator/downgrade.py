@@ -10,7 +10,7 @@ from conf.config import settings
 from infra.logger import setup_logging
 from orchestrator.base import WorkflowRegistry
 from orchestrator.idempotency import Status
-from orchestrator.workflow_engine import StepResult, compensate, replay_steps
+from orchestrator.workflow_engine import ProcessContext, StepResult, compensate, replay_steps
 from repository.process_tracker import acquire_recovery_lock, detect, transition_status
 from runtime.context import OperatorContext, RequestContext, set_request_context
 from utils.trace_id_util import trace_id_context
@@ -35,7 +35,13 @@ async def handle_processes(registry: WorkflowRegistry):
 
         # ② 重建 process 的请求上下文(operator / trace_id,供代签 + 审计关联)
         operator = OperatorContext.from_operator_context(process.operator_context)
-        set_request_context(RequestContext(operator=operator, process_id=process.id, trace_id=process.trace_id))
+        set_request_context(
+            RequestContext(
+                operator=operator,
+                workflow_registry=registry,
+                trace_id=process.trace_id,
+            )
+        )
         trace_id_context.set(process.trace_id)
 
         # ③ 重建 workflow + 业务入参
@@ -54,7 +60,8 @@ async def handle_processes(registry: WorkflowRegistry):
         # ⑤ 在失败点 throw 补偿(与正常失败同路径);fail_step=None 说明 replay 全成功 → 标 completed
         if fail_step is not None:
             fail_step_result = StepResult(name="downgrade", error="心跳超时中断")
-            await compensate(generator, step_results, fail_step_result, on_step=None) # 执行补偿流程
+            process_ctx = ProcessContext(process_id=process.id)
+            await compensate(generator, step_results, fail_step_result, process_ctx, on_step=None)  # 执行补偿流程
             # 失败:标 failed
             await transition_status(
                 process.id,

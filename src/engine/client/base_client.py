@@ -10,7 +10,7 @@ class ApiMessageRequest:
     """统一的 llm 调用入参"""
 
     model: str  # 使用的模型
-    message: list[ConversationMessage]  # 用户/ai消息列表
+    messages: list[ConversationMessage]  # 用户/ai消息列表
     system_prompt: str | None = None  # 提示词
     max_tokens: int = 4096
     tools: list[dict[str, Any]] = field(default_factory=list)  # 工具源信息
@@ -33,9 +33,9 @@ class ApiMessageCompleteEvent:
 ApiStreamEvent = ApiTextDeltaEvent | ApiMessageCompleteEvent
 
 
-class SupportsInvokeMessages(Protocol):
+class SupportsStreamingMessages(Protocol):
     """llm 客户端协议,所有 llm 调用统一通过该接口"""
 
-    async def stream_message(self, request: ApiMessageRequest) -> AsyncGenerator[ApiStreamEvent, None]:
+    def stream_message(self, request: ApiMessageRequest) -> AsyncGenerator[ApiStreamEvent, None]:
         """调用 llm 流式返回统一结构化响应"""
         ...

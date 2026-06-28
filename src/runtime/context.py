@@ -1,18 +1,18 @@
 """请求级运行时上下文。
 
-每请求在 api 层(deps.py)构建一个 :class:`RequestContext` 实例,聚合该请求的
-操作人身份(operator)、trace_id 等请求级状态,在请求生命周期内有状态、用完即弃
-(不持久化)。深层组件(adapter 等)通过 :func:`get_operator` 经 :class:`ContextVar`
-取到当前请求的 operator,无需层层透传。
-
-这是平台「请求级执行上下文」的归宿(见 CLAUDE.md「runtime/」层):api 层构建,
-串联 parse → resolve → 幂等 → orchestrator 全链,承载意图 / 参数 / 幂等键 / 步骤
+api 层每请求构建一个 :class:`RequestContext` 实例,聚合该请求的操作人身份(operator)、
+trace_id 等请求级**只读不变量**,请求生命周期内不变、用完即弃(不持久化)。深层组件通过
+:func:`get_operator` 经 :class:`ContextVar` 只读取到当前请求的 operator,无需层层透传。
 """
 
 from __future__ import annotations
 
 from contextvars import ContextVar
 from dataclasses import dataclass, field
+
+from engine.client.base_client import SupportsStreamingMessages
+from engine.client.messages import ConversationMessage
+from orchestrator.base import WorkflowRegistry
 
 
 @dataclass
@@ -47,19 +47,37 @@ class OperatorContext:
 
 
 @dataclass
-class RequestContext:
-    """请求级有状态上下文。
+class ModelContext:
+    """LLM 调用配置快照(由 runner 从全局配置 settings 读取并注入)。"""
 
-    每请求在 api 层构建一个实例,承载该请求的用户身份与中间产物,请求结束即弃。
-    未来可扩展:意图、参数、幂等键、步骤中间产物等请求级状态。
+    provider: str | None = None  # 厂商(openai / anthropic)
+    model: str | None = None  # 模型名
+    temperature: float = 0.3  # 采样温度
+    max_tokens: int | None = 4096  # 最大输出token数
+
+
+@dataclass(frozen=True)
+class RequestContext:
+    """请求级只读不变量上下文。
+
+    api 层每请求构建一个实例,承载该请求的用户身份与 LLM 配置,请求结束即弃。
+    LLM 专用字段(model / api_client / system_prompt / messages)在非 LLM 路径(如降级)可不填。
     """
 
+    # 操作人信息
     operator: OperatorContext
+    # 使用的 model 配置
+    model: ModelContext | None = None
+    # llm客户端
+    api_client: SupportsStreamingMessages | None = None
+    # 标准系统提示词
+    system_prompt: str | None = None
+    # 用户查询提示词
+    messages: list[ConversationMessage] | None = None
+    # 工作流注册器
+    workflow_registry: WorkflowRegistry | None = None
+    # 流程追踪id
     trace_id: str | None = None
-    # 流程实例 id(dispatcher 创建 process 后回填,供 adapter 审计留痕关联)
-    process_id: int | None = None
-    # 步骤实例 id(workflow 每步创建 process_step 后回填,供 adapter 审计留痕关联到具体步)
-    step_id: int | None = None
 
 
 # ContextVar:持有当前请求的 RequestContext
@@ -80,32 +98,3 @@ def get_operator() -> OperatorContext | None:
     """读取当前请求的操作人,可能为 ``None``(未认证或未设置)。"""
     ctx = _request_context.get()
     return ctx.operator if ctx else None
-
-
-def set_process_id(process_id: int | None) -> None:
-    """回填当前请求关联的流程实例 id(dispatcher 创建 process 后调用)。"""
-    ctx = _request_context.get()
-    if ctx is not None:
-        ctx.process_id = process_id
-
-
-def get_process_id() -> int | None:
-    """读取当前请求关联的流程实例 id,可能为 ``None``(非流程上下文内)。"""
-    ctx = _request_context.get()
-    return ctx.process_id if ctx else None
-
-
-def set_step_id(step_id: int | None) -> None:
-    """回填当前执行步骤的 id(workflow 每步创建 process_step 后调用)。
-
-    每步执行前 set、结束后置 ``None``,使该步内的 adapter 审计留痕精确关联到当前步。
-    """
-    ctx = _request_context.get()
-    if ctx is not None:
-        ctx.step_id = step_id
-
-
-def get_step_id() -> int | None:
-    """读取当前执行步骤的 id,可能为 ``None``(非步骤上下文或步间已清空)。"""
-    ctx = _request_context.get()
-    return ctx.step_id if ctx else None

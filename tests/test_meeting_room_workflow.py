@@ -9,7 +9,7 @@ mock 下游 client 与步骤留痕(避免真实 yudao / DB),驱动 BaseWorkflow.
 """
 
 import unittest
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 from orchestrator.workflow.meeting_room import (
     MeetingRoomBookingInput,
@@ -41,7 +41,7 @@ class MeetingRoomWorkflowTest(unittest.IsolatedAsyncioTestCase):
         set_request_context(
             RequestContext(
                 operator=OperatorContext(user_id="9527", tenant_id="1", name="王五"),
-                process_id=100,
+                trace_id="test",
             )
         )
 
@@ -49,7 +49,10 @@ class MeetingRoomWorkflowTest(unittest.IsolatedAsyncioTestCase):
         set_request_context(None)
 
     async def _run(self, client_mock):
-        """mock 留痕 + client,跑一次 execute,返回 WorkflowResult。"""
+        """mock 留痕 + client,跑一次 execute,返回 WorkflowResult。
+
+        adapter action 首参为 ProcessContext(由 Step.execute 注入),故断言用 ANY 匹配。
+        """
         with (
             patch("orchestrator.workflow_engine.create_step", AsyncMock(return_value=1)),
             patch("orchestrator.workflow_engine.finish_step", AsyncMock()),
@@ -57,7 +60,7 @@ class MeetingRoomWorkflowTest(unittest.IsolatedAsyncioTestCase):
             patch("orchestrator.workflow.meeting_room.room_booking_adapter", client_mock),
         ):
             wf = MeetingRoomBookingWorkflow()
-            return await wf.execute(self._args())
+            return await wf.execute(self._args(), process_id=100)
 
     async def test_all_steps_success(self):
         """全成功:三步顺序执行,bookingId 经 ref 流转,无补偿(cancel 不调)。"""
@@ -71,9 +74,9 @@ class MeetingRoomWorkflowTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse(result.is_error)
         client.submit_booking.assert_awaited_once()
-        # bookingId 经 ref 流转:approve/update 收到 123
-        client.approve_booking.assert_awaited_once_with(booking_id=123)
-        client.update_use_status.assert_awaited_once_with(booking_id=123, use_status=1)
+        # bookingId 经 ref 流转:approve/update 收到 123(首参 ProcessContext 用 ANY 匹配)
+        client.approve_booking.assert_awaited_once_with(ANY, booking_id=123)
+        client.update_use_status.assert_awaited_once_with(ANY, booking_id=123, use_status=1)
         # 全成功不触发补偿
         client.cancel_booking.assert_not_awaited()
 
@@ -88,9 +91,9 @@ class MeetingRoomWorkflowTest(unittest.IsolatedAsyncioTestCase):
         result = await self._run(client)
 
         self.assertTrue(result.is_error)
-        client.approve_booking.assert_awaited_once_with(booking_id=123)
-        # 统一补偿:cancel(submit 绑定的 bookingId=123)
-        client.cancel_booking.assert_awaited_once_with(123)
+        client.approve_booking.assert_awaited_once_with(ANY, booking_id=123)
+        # 统一补偿:cancel(submit 绑定的 bookingId=123;首参 ProcessContext + 位置 booking_id)
+        client.cancel_booking.assert_awaited_once_with(ANY, 123)
         # approve 失败后不应执行 update
         client.update_use_status.assert_not_awaited()
 
@@ -106,7 +109,7 @@ class MeetingRoomWorkflowTest(unittest.IsolatedAsyncioTestCase):
         result = await self._run(client)
 
         self.assertTrue(result.is_error)
-        client.cancel_booking.assert_awaited_once_with(123)
+        client.cancel_booking.assert_awaited_once_with(ANY, 123)
 
 
 if __name__ == "__main__":

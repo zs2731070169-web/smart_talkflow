@@ -69,6 +69,8 @@ class Settings(BaseSettings):
 
     llm_temperature: float = 0.3
 
+    max_tokens: int = 4096
+
     # ---- 提示词仓库(可选,用于从远程 git 仓库拉取系统提示词)----
     is_git_repo: bool = False
 

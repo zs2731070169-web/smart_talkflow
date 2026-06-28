@@ -5,7 +5,7 @@ from __future__ import annotations
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar
 
 import httpx
 from sqlalchemy.exc import SQLAlchemyError
@@ -29,9 +29,12 @@ from infra.exceptions import (
 from infra.logger import setup_logging
 from orchestrator.workflow_engine import StepResult
 from repository.models import AdapterCallLog
-from runtime.context import get_operator, get_process_id, get_step_id
+from runtime.context import get_operator
 from services.credential import CredentialProvider, default_credential_provider
 from utils.trace_id_util import get_trace_id
+
+if TYPE_CHECKING:
+    from orchestrator.workflow_engine import ProcessContext
 
 logger = setup_logging(__name__)
 
@@ -115,9 +118,9 @@ class BaseAdapter(ABC):
     target_system = ""
 
     def __init__(
-            self,
-            base_url: str = "",
-            credential_provider: CredentialProvider | None = None,
+        self,
+        base_url: str = "",
+        credential_provider: CredentialProvider | None = None,
     ):
         self.base_url = base_url
         # 凭证默认按 target_system 自动加载服务账号; 也可显式注入覆盖。
@@ -221,10 +224,11 @@ class BaseAdapter(ABC):
             credential_source="service_account_delegated" if operator else None,
         )
 
-    async def step_call(self, request: AdapterRequest) -> StepResult:
+    async def step_call(self, process_ctx: ProcessContext, request: AdapterRequest) -> StepResult:
         """_call_action + 转 StepResult(供 workflow engine 的 Step.func 用)。
 
         adapter 层负责 AdapterResponse → StepResult 转换(引擎不认 AdapterResponse)。
+        process_ctx(执行级追踪)由 Step.execute 注入,用于落 AdapterCallLog 关联 process/step。
         """
         resp = await self._call_action(request)
 
@@ -233,8 +237,8 @@ class BaseAdapter(ABC):
             async with db_session() as session:
                 session.add(
                     AdapterCallLog(
-                        process_id=get_process_id(),
-                        step_execution_id=get_step_id(),
+                        process_id=process_ctx.process_id,
+                        step_execution_id=process_ctx.step_id,
                         adapter=resp.adapter,
                         target_system=resp.target_system,
                         action=resp.action,

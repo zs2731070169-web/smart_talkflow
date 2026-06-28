@@ -23,7 +23,6 @@ from repository.step_tracker import (
     finish_step,
     list_completed_steps,
 )
-from runtime.context import get_process_id, set_step_id
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +51,14 @@ class StepResult:
 
 
 @dataclass
+class ProcessContext:
+    """单次 process(工作流执行)的追踪上下文"""
+
+    process_id: int | None
+    step_id: int | None = None
+
+
+@dataclass
 class Step:
     """一步对外调用(声明式):func 直接返回 StepResult(adapter 层已把 AdapterResponse 转好)。"""
 
@@ -60,8 +67,8 @@ class Step:
     kwargs: dict = field(default_factory=dict)
     name: str = ""
 
-    async def execute(self) -> StepResult:
-        return await self.func(*self.args, **self.kwargs)
+    async def execute(self, process_ctx: ProcessContext) -> StepResult:
+        return await self.func(process_ctx, *self.args, **self.kwargs)
 
 
 def step(func: Callable[..., Awaitable[StepResult]], *args: Any, name: str = "", **kwargs: Any) -> Step:
@@ -90,23 +97,22 @@ def _step_meta(step: Step) -> tuple[str, str, dict]:
     instance = getattr(step.func, "__self__", None)
     adapter = getattr(instance, "adapter_name", None) or getattr(instance, "target_system", "") or "unknown"
     action = getattr(step.func, "__name__", "call")
-    input_params = {**dict(zip(_arg_names(step.func), step.args, strict=False)), **step.kwargs}
+    biz_args_names = _arg_names(step.func)[1:]  # 跳过首参 process_ctx, 只取业务参数名
+    input_params = {**dict(zip(biz_args_names, step.args, strict=False)), **step.kwargs}
     return adapter, action, input_params
 
 
-async def _exec_step(step: Step, step_no: int) -> StepResult:
+async def _exec_step(step: Step, step_no: int, process_ctx: ProcessContext) -> StepResult:
     """单步执行:心跳 → 留痕 → 执行(StepResult) → 写终态。"""
-    process_id = get_process_id()
-
     # ① 续心跳(失联判定基准)
-    await flush_heartbeat(process_id)
+    await flush_heartbeat(process_ctx.process_id)
 
     # ② 推断元信息
     adapter, action, input_params = _step_meta(step)
 
     # ③ 留痕占位
     step_id = await create_step(
-        process_id,
+        process_ctx.process_id,
         step_no,
         step_key=step.name or action,
         step_name=step.name or action,
@@ -115,22 +121,19 @@ async def _exec_step(step: Step, step_no: int) -> StepResult:
         input_params=input_params,
     )
 
-    # ④ 回填,供 adapter_call_logs 关联
-    if step_id is not None:
-        set_step_id(step_id)
+    # ④ 设当前步到执行上下文(供该步内 adapter 落 adapter_call_logs 关联)
+    process_ctx.step_id = step_id
 
-        # ⑤ 执行(func 返回 StepResult);
+    # ⑤ 执行(func 返回 StepResult)
     logger.info("步 %d 开始:%s.%s", step_no, adapter, action)
     started = perf_counter()
     try:
-        result = await step.execute()
+        result = await step.execute(process_ctx)
     except Exception as exc:
         logger.warning("步 %d 异常归一:%s", step_no, exc)
         result = StepResult(ok=False, error=str(exc) or f"引擎未捕获异常: {exc!r}")
     else:
         result = replace(result, name=step.name, step_id=step_id)  # 引擎补声明元信息
-    finally:
-        set_step_id(None)
 
     # ⑥ 写终态(每步存 result_data,供降级回溯)
     duration_ms = int((perf_counter() - started) * 1000)
@@ -146,7 +149,7 @@ async def _exec_step(step: Step, step_no: int) -> StepResult:
 
 
 async def drive(
-    workflow, arguments, *, on_step: Callable[[StepResult], Awaitable[None]] | None = None
+    workflow, arguments, process_ctx: ProcessContext, *, on_step: Callable[[StepResult], Awaitable[None]] | None = None
 ) -> WorkflowResult:
     """驱动 workflow.create generator:send 推进, 失败 throw Compensate 补偿。"""
     # 创建定义好的工作流编排, 返回生成器
@@ -168,7 +171,7 @@ async def drive(
             if not isinstance(step, Step):
                 raise TypeError(f"create 必须 yield Step,得到 {type(step)}")
 
-            result = await _exec_step(step, len(step_results) + 1)
+            result = await _exec_step(step, len(step_results) + 1, process_ctx)
 
             # 添加步骤结果
             step_results.append(result)
@@ -183,7 +186,7 @@ async def drive(
             if not result.ok:
                 # 失败:throw Compensate 触发补偿分支, 驱动补偿步直到 StopIteration
                 logger.info("drive:步 %d 失败(%s),转补偿", len(step_results), result.error)
-                return await compensate(gen, step_results, result, on_step)
+                return await compensate(gen, step_results, result, process_ctx, on_step)
     except Exception as exc:
         logger.exception("drive 异常:workflow=%s", getattr(workflow, "name", "?"))
         return WorkflowResult(
@@ -197,6 +200,7 @@ async def compensate(
     gen: Generator,
     step_results: list[StepResult],
     fail_step_result: StepResult,
+    process_ctx: ProcessContext,
     on_step: Callable[[StepResult], Awaitable[None]] | None,
 ) -> WorkflowResult:
     """gen.throw(Compensate) 触发 create 补偿分支,驱动补偿步直到 StopIteration。"""
@@ -221,7 +225,7 @@ async def compensate(
     step_no = len(step_results) + 1
 
     while True:  # 驱动补偿步(终态/逆序都由 create 的 except 体决定)
-        result = await _exec_step(step, step_no)
+        result = await _exec_step(step, step_no, process_ctx)
         logger.info("补偿步执行:%s ok=%s", result.name, result.ok)
         step_results.append(result)
         if on_step:

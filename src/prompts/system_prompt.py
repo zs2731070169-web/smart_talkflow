@@ -14,7 +14,7 @@ import logging
 from pathlib import Path
 
 from conf.config import ROOT_PATH
-from engine.prompts.envirement import EnvironmentInfo
+from prompts.envirement import EnvironmentInfo
 
 logger = logging.getLogger(__name__)
 

@@ -11,8 +11,8 @@
 
 import unittest
 
-from engine.prompts.envirement import EnvironmentInfo
-from engine.prompts.system_prompt import build_system_prompt, get_base_system_prompt
+from prompts import EnvironmentInfo
+from prompts import build_system_prompt, get_base_system_prompt
 
 
 class SystemPromptTest(unittest.IsolatedAsyncioTestCase):

@@ -21,13 +21,13 @@ from api.router import router
 from infra.exceptions import ApiException
 from infra.redis_client import close_redis
 from runtime.heartbeat import heartbeat_watchdog
-from runtime.runner import build_runtime
+from runtime.runner import RuntimeBundle, build_runtime
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """应用生命周期: 启动装配运行时 + 后台看门狗"""
-    runtime = build_runtime()
+    runtime = build_runtime(RuntimeBundle())
     app.state.runtime = runtime
     watchdog_task = asyncio.create_task(heartbeat_watchdog(runtime.registry))
     try:
@@ -37,7 +37,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         watchdog_task.cancel()
         # 等待任务真正结束, return_exceptions=True  把 CancelledError 吞掉，避免抛到外层导致报错
         await asyncio.gather(watchdog_task, return_exceptions=True)
-        await _db.async_engine.dispose()
+        await _db.dispose_engine()
         await close_redis()
 
 

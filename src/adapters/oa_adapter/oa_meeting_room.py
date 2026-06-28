@@ -14,7 +14,7 @@ from adapters.oa_adapter.oa_base import OAAdapter
 from conf import settings
 
 if TYPE_CHECKING:
-    from orchestrator.workflow_engine import StepResult
+    from orchestrator.workflow_engine import ProcessContext, StepResult
 
 
 class MeetingRoomBookingAdapter(OAAdapter):
@@ -24,6 +24,7 @@ class MeetingRoomBookingAdapter(OAAdapter):
 
     async def submit_booking(
         self,
+        process_ctx: ProcessContext,
         room_id: int,
         meeting_title: str,
         meeting_start_time: str,
@@ -33,6 +34,7 @@ class MeetingRoomBookingAdapter(OAAdapter):
     ) -> StepResult:
         """Step 1 提交会议室预订(发起审批),返回 bookingId。"""
         return await self.step_call(
+            process_ctx,
             AdapterRequest(
                 action="submit_booking",
                 method="POST",
@@ -45,32 +47,34 @@ class MeetingRoomBookingAdapter(OAAdapter):
                     "creator": creator,
                     "moderatorId": moderator_id,
                 },
-            )
+            ),
         )
 
-    async def approve_booking(self, booking_id: int) -> StepResult:
+    async def approve_booking(self, process_ctx: ProcessContext, booking_id: int) -> StepResult:
         """Step 2 审批通过会议室预订。"""
         return await self.step_call(
+            process_ctx,
             AdapterRequest(
                 action="approve_booking",
                 method="PUT",
                 path="/admin-api/oa/meeting-room-booking/approve",
                 params={"id": booking_id},
-            )
+            ),
         )
 
-    async def update_use_status(self, booking_id: int, use_status: int) -> StepResult:
+    async def update_use_status(self, process_ctx: ProcessContext, booking_id: int, use_status: int) -> StepResult:
         """Step 3 更新使用状态(0待使用/1使用中/2已完成/3已取消)。"""
         return await self.step_call(
+            process_ctx,
             AdapterRequest(
                 action="update_use_status",
                 method="PUT",
                 path="/admin-api/oa/meeting-room-booking/update-use-status",
                 params={"id": booking_id, "useStatus": use_status},
-            )
+            ),
         )
 
-    async def cancel_booking(self, booking_id: int) -> StepResult:
+    async def cancel_booking(self, process_ctx: ProcessContext, booking_id: int) -> StepResult:
         """补偿动作:取消会议室预订。
 
         yudao ``PUT /cancel`` 是终态覆盖(一次性置 ``useStatus=3`` + ``processStatus=4``),
@@ -79,12 +83,13 @@ class MeetingRoomBookingAdapter(OAAdapter):
         逆序补偿多次重试。
         """
         return await self.step_call(
+            process_ctx,
             AdapterRequest(
                 action="cancel_booking",
                 method="PUT",
                 path="/admin-api/oa/meeting-room-booking/cancel",
                 params={"id": booking_id},
-            )
+            ),
         )
 
 

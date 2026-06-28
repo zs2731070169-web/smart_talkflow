@@ -15,11 +15,15 @@ import unittest
 
 from sqlalchemy import text
 
-from infra.database import db_session, dispose_engine
+from infra.database import db_session, dispose_engine, init_engine
 
 
 class DatabaseTest(unittest.IsolatedAsyncioTestCase):
     """数据库会话冒烟测试。"""
+
+    async def asyncSetUp(self):
+        # 装配 DB 引擎(原模块级初始化移到显式装配)
+        init_engine()
 
     async def test_select_one(self):
         async with db_session() as session:

@@ -29,7 +29,6 @@ import asyncio
 import unittest
 
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 import infra.database as _db
 from infra.database import db_session
@@ -193,13 +192,7 @@ async def _reset_engine_for_loop() -> None:
         await _db.async_engine.dispose()
     except Exception:
         pass
-    _db.async_engine = _db._create_engine()
-    _db.AsyncSessionLocal = async_sessionmaker(
-        bind=_db.async_engine,
-        class_=AsyncSession,
-        expire_on_commit=False,
-        autoflush=False,
-    )
+    _db.init_engine()  # 重建引擎与会话工厂(替代手动 create + sessionmaker)
 
 
 class IdempotencyIntegrationTest(unittest.IsolatedAsyncioTestCase):

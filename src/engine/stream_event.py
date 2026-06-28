@@ -1,6 +1,15 @@
 from dataclasses import dataclass
 from typing import Any
 
+from engine.client.messages import ConversationMessage
+
+
+@dataclass(frozen=True)
+class AssistantTurnComplete:
+    """ai 完成回复"""
+
+    message: ConversationMessage
+
 
 @dataclass(frozen=True)
 class AssistantTextDelta:
@@ -27,4 +36,4 @@ class ToolExecutionCompleted:
     metadata: dict[str, Any] | None = None
 
 
-StreamEvent = AssistantTextDelta | ToolExecutionStarted | ToolExecutionCompleted
+StreamEvent = AssistantTextDelta | ToolExecutionStarted | ToolExecutionCompleted | AssistantTurnComplete

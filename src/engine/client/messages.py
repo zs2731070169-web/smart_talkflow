@@ -49,3 +49,8 @@ class ConversationMessage(BaseModel):
         if value is None:
             return []
         return value
+
+    @property
+    def tool_uses(self) -> list[ToolUseBlock]:
+        """返回所有工具调用"""
+        return [block for block in self.content if isinstance(block, ToolUseBlock)]

@@ -18,7 +18,6 @@ class WorkflowResult(BaseModel):
 
     output: str
     is_error: bool = False
-    retryable: bool = False
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
@@ -37,11 +36,11 @@ class BaseWorkflow(ABC):
     def business_key(self, arguments: BaseModel) -> str | None:
         """从入参提取业务唯一键(供流程级幂等校验使用)。"""
 
-    async def execute(self, arguments: BaseModel) -> WorkflowResult:
+    async def execute(self, arguments: BaseModel, process_id: int | None) -> WorkflowResult:
         """通用驱动:委托 workflow_engine.drive 驱动"""
-        from orchestrator.workflow_engine import drive
+        from orchestrator.workflow_engine import ProcessContext, drive
 
-        return await drive(self, arguments)
+        return await drive(self, arguments, ProcessContext(process_id=process_id))
 
     def to_api_schema(self) -> dict[str, Any]:
         """将工作流定义结构序列化为API格式."""
@@ -61,6 +60,11 @@ class WorkflowRegistry:
     def register(self, workflow: BaseWorkflow) -> None:
         """工作流实例注册."""
         self._workflows[workflow.name] = workflow
+
+    def register_workflows(self, workflows: list[BaseWorkflow]) -> None:
+        """多个工作流实例注册"""
+        for workflow in workflows:
+            self.register(workflow)
 
     def list_workflows(self) -> list[BaseWorkflow]:
         """返回所有注册的工作流."""
