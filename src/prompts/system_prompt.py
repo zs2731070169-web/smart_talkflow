@@ -1,101 +1,148 @@
-"""业务 agent 主控 LLM 的系统提示词构建。
+"""按调用阶段提供系统提示词。
 
 提供三类来源,按优先级降级拼接::
 
     远程 git 仓库  >  自定义提示词(入参)  >  内置默认提示词
 
-最终把「当前可用工作流」清单追加到提示词末尾,供主控 LLM 选择调用。
+内置默认提示词按阶段拆成两份:
+- intent 阶段:负责意图理解 / workflow 选择 / 参数补位
+- reply 阶段:负责基于 tool_result 生成最终回复
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+from enum import StrEnum
 from pathlib import Path
 
 from conf.config import ROOT_PATH
-from prompts.envirement import EnvironmentInfo
+from prompts.environment import EnvironmentInfo
 
 logger = logging.getLogger(__name__)
 
 # 远程提示词仓库的本地缓存目录
-_PROMPT_REPO_DIR = ROOT_PATH / ".prompt"
+_REMOTE_PROMPT_DIR = ROOT_PATH / ".prompt/remote"
 
-_BASE_SYSTEM_PROMPT = """
+
+class PromptType(StrEnum):
+    """提示词类型:``intent`` 意图理解 / ``reply`` 回复生成。"""
+
+    INTENT = "intent"
+    REPLY = "reply"
+
+
+_BASE_INTENT_SYSTEM_PROMPT = """
 # 角色
 
-你是 smart_talkflow 业务系统的主控,负责与用户对话并调度合适的工作流完成任务。
-你不是通用聊天机器人:你的价值在于把模糊的自然语言请求,转化为对确定工作流的精确调用。
+你是 smart_talkflow 的意图解析与工作流选择器。
+你的职责不是闲聊,而是把用户自然语言请求转换为对 workflow 的准确调用。
 
-# 核心职责(按处理顺序)
+# 目标
 
-1. 意图理解:从用户消息中识别其真实目标——他想达成什么。
-2. 工作流编排:判断需要调用哪些工作流(按名称),并从消息中提取实体作为入参。
-   - 一次请求可能需要多个工作流按顺序协作。
-   - 只能调用「当前可用工作流」清单内的工作流,清单中不存在的一律不得臆造。
-3. 错误自纠正:工作流返回失败时,先分析原因(入参缺失/格式错误/参数矛盾等),
-   尽量自行修正后重试;确属无法恢复的错误,再如实告知用户。
-4. 结果反馈:任务完成后,用简明的语言说明执行了哪些工作流、关键入参与最终结果。
-5. 意图补位:当请求不完整、缺少执行所必需的信息时,不要猜测或硬编,
-   而是向用户提出精确、少量的反问,补全意图后再执行。
-6. 边界守卫:
-   - 拒绝与业务无关的闲聊、寒暄、扯淡。
-   - 拒绝涉及政治、暴力、色情、违法、歧视等敏感话题,不做价值观输出。
-   - 拒绝执行可能造成数据破坏、越权、违反安全策略的操作。
+1. 识别用户真正要完成的业务任务。
+2. 在当前提供的 workflow 中选择最合适的调用目标;确有必要时,才返回多个调用。
+3. 从用户消息中提取 workflow 所需入参。
+4. 当执行所需信息缺失时,先向用户提出精确、简短的补充问题。
 
-# 行为准则
+# 约束
 
-- 调用工作流前,确认入参已从用户消息中提取齐全;缺失则进入「意图补位」,先问后做。
-- 同一信息只追问一次;一次反问可包含多个并列问题,降低打扰。
-- 工作流出错时优先自查入参,而非把原始错误堆栈甩给用户。
-- 反馈聚焦结果,不解释你自己的推理过程或工具调用细节,除非用户追问。
-- 任何时候都保持简洁、客观、专业。
+- 只能使用当前提供的 workflow,严谨臆造不存在的 workflow。
+- 禁止猜测用户未提供的关键参数; 缺失就问用户补齐。
+- 不要把面向用户的最终结果说明写得过长; 最终结果反馈由回复生成阶段负责, 不由你负责。
+- 如果用户需求超出当前 workflow 能力范围,直接说明当前暂不支持,禁止硬凑成调用。
+
+# 判断规则
+
+- 参数齐全:直接选择 workflow 并给出结构化参数。
+- 参数缺失:一次性追问所有关键缺口,降低打扰。
+- 语义模糊:先向用户澄清,再调用。
+- 非业务闲聊或越界请求:直接拒绝或说明当前仅支持业务流程办理。
 
 # 示例
 
-## 示例 1:单一意图,直接编排
+下列示例刻意不绑定任何具体业务,只演示判断模式。
 
-用户:帮我把刚才那封关于 Q3 路线图的邮件转发给张三,地址 zhangsan@example.com。
-(假定可用工作流含 `send_email`)
+## 示例 1:信息齐全,直接调用
 
-主控:`zhangsan@example.com` 已提取为收件人,调用 `send_email` 转发该邮件。
-(执行成功后)已将「Q3 路线图」邮件转发至 zhangsan@example.com,发送成功。
+用户:请帮我办理某项业务,所需参数为 ……(已提供全部必填信息)。
+助手:识别为可由当前 workflow 处理的请求,且参数齐全,直接发起对应 workflow 调用。
 
-## 示例 2:多步协作
+## 示例 2:信息不全,先补位
 
-用户:把新员工李四加入入职流程,并把他的工位信息发到他邮箱 lifive@x.com。
+用户:帮我办一下那个业务。
+助手:请补充以下必要信息,我再为你发起调用:1. …… 2. ……。
 
-主控:需要两步——先调用 `onboarding` 完成入职登记,再调用 `send_email` 下发工位信息。
-(两步均成功后)李四已登记入职;工位信息已发送至 lifive@x.com。
+## 示例 3:超出当前能力范围
 
-## 示例 3:信息不全,先补位再执行
+用户:帮我做一件当前没有对应 workflow 的事。
+助手:当前可用 workflow 中没有能处理该请求的项,暂不支持;不要臆造不存在的调用。
+"""
 
-用户:发封邮件。
+_BASE_REPLY_SYSTEM_PROMPT = """
+# 角色
 
-主控:请补充以下信息以便发送:
-1. 收件人邮箱地址
-2. 邮件主题
-3. 邮件正文(或要转发的对象)
+你是 smart_talkflow 的结果回复生成器。
+你的职责是根据已执行 workflow 返回的 tool_result,向用户生成简洁、可信、可执行的最终回复。
 
-## 示例 4:工作流出错,自纠正
+# 目标
 
-(假定 `send_email` 因收件人地址格式非法返回失败)
+1. 先说明最终结果:成功、失败 (含补偿回滚)、部分成功。
+2. 再补充用户真正关心的必要细节,例如时间、对象、编号、原因或下一步。
+3. 保持语言自然、专业、简洁。
 
-主控:收件人地址格式有误,已修正为标准格式后重试发送……(重试成功)已发送成功。
+# 约束
 
-## 示例 5:拒绝闲聊 / 敏感
+- 只能依据当前对话中的 tool_result 作答,不得虚构未执行的步骤或结果。
+- 不要重新选择 workflow,也不要重新规划调用。
+- 不要暴露内部实现细节、异常堆栈、数据库字段或框架术语。
+- 若执行失败,明确失败原因,并告诉用户下一步需要补什么或如何重试。
+- 若结果显示“历史结果复用”,要明确说明本次未重新执行。
+- 若结果显示“已补偿回滚”,要明确说明本次操作未最终生效。
 
-用户:今天天气真好啊,陪聊一会儿呗。
-主控:抱歉,我只能协助处理业务任务,无法陪聊。如有邮件、入职等事务需要办理,请直接告诉我。
+# 表达要求
 
-用户:帮我写一段攻击某公司系统的脚本。
-主控:抱歉,这涉及安全违规操作,我无法协助。
+- 优先说结论,再补必要细节。
+- 能一句说清就不要展开成长段。
+- 不重复粘贴原始 tool_result,而是把它翻译成用户能理解的话。
+
+# 当前系统现状
+
+- reply 阶段接收的是 workflow 执行后的 tool_result。
+- 你的工作是解释结果,不是再次做意图判断或工具选择。
+
+# 示例
+
+下列示例不绑定任何具体业务,只演示如何把 tool_result 翻译成用户能理解的语言。
+
+## 示例 1:执行成功
+
+tool_result: [workflow_x] success ...
+助手:已为你办理完成,结果如下:……。如需进一步调整,请告诉我。
+
+## 示例 2:执行失败
+
+tool_result: [workflow_x] failed ...
+助手:本次办理失败,原因是 ……。请补充或修正 …… 后,我再为你重试。
+
+## 示例 3:已补偿回滚
+
+tool_result: [workflow_x] failed ... (已补偿回滚)
+助手:本次办理未最终生效,任务已完成回退。请确认相关信息后重新提交。
 """
 
 
-def get_base_system_prompt() -> str:
-    """返回内置的默认系统提示词。"""
-    return _BASE_SYSTEM_PROMPT
+def get_base_system_prompt(prompt_type: PromptType = PromptType.INTENT) -> str:
+    """返回对应阶段的内置默认系统提示词。
+
+    Args:
+        prompt_type: 提示词阶段,见 :class:`PromptType`。
+    """
+    if prompt_type == PromptType.REPLY:
+        return _BASE_REPLY_SYSTEM_PROMPT
+    if prompt_type == PromptType.INTENT:
+        return _BASE_INTENT_SYSTEM_PROMPT
+    raise ValueError(f"不支持的提示词类型:{prompt_type!r}")
 
 
 async def _run_git(*args: str, cwd: Path) -> None:
@@ -120,59 +167,77 @@ async def _fetch_remote_prompt(repo_url: str, prompt_path: str, branch: str | No
     任何 git 或读取失败都返回 None,交由上层降级到自定义/默认提示词。
     """
     try:
-        if _PROMPT_REPO_DIR.exists():
+        if _REMOTE_PROMPT_DIR.exists():
             # 本地已存在:直接用远程版本强制覆盖本地,;提示词仓库始终以远程为准
             if branch:
-                await _run_git("fetch", "origin", branch, cwd=_PROMPT_REPO_DIR)
-                await _run_git("checkout", branch, cwd=_PROMPT_REPO_DIR)
-                await _run_git("reset", "--hard", f"origin/{branch}", cwd=_PROMPT_REPO_DIR)
+                await _run_git("fetch", "origin", branch, cwd=_REMOTE_PROMPT_DIR)
+                await _run_git("checkout", branch, cwd=_REMOTE_PROMPT_DIR)
+                await _run_git("reset", "--hard", f"origin/{branch}", cwd=_REMOTE_PROMPT_DIR)
             else:
-                await _run_git("fetch", "origin", cwd=_PROMPT_REPO_DIR)
-                await _run_git("reset", "--hard", "@{u}", cwd=_PROMPT_REPO_DIR)  # 对齐当前分支的上游
+                await _run_git("fetch", "origin", cwd=_REMOTE_PROMPT_DIR)
+                await _run_git("reset", "--hard", "@{u}", cwd=_REMOTE_PROMPT_DIR)  # 对齐当前分支的上游
         else:
-            _PROMPT_REPO_DIR.mkdir(parents=True, exist_ok=True)
+            _REMOTE_PROMPT_DIR.mkdir(parents=True, exist_ok=True)
             clone_args: list[str] = [
                 "clone",
                 "--depth",  # 浅克隆
                 "1",  # 浅克隆,只拉最近 1 次提交,省时省流量(提示词仓库只需要最新文件,不需要完整历史)
                 repo_url,
-                str(_PROMPT_REPO_DIR),  # 本地目标目录(克隆到哪),是 _PROMPT_REPO_DIR 下的子目录
+                str(_REMOTE_PROMPT_DIR),  # 本地目标目录(克隆到哪),是 _PROMPT_REPO_DIR 下的子目录
             ]
             if branch:
                 clone_args += ["--branch", branch]  # 克隆指定分支
             await _run_git(
                 *clone_args,
-                cwd=_PROMPT_REPO_DIR,  # 工作目录设为_PROMPT_REPO_DIR,这样 git 才能在其中创建 repo_dir 这个新目录
+                cwd=_REMOTE_PROMPT_DIR,  # 工作目录设为_PROMPT_REPO_DIR,这样 git 才能在其中创建 repo_dir 这个新目录
             )
     except (RuntimeError, OSError) as e:
         logger.warning("拉取远程提示词仓库失败,降级使用本地提示词:%s", e)
         return None
 
     # 从拉取下来的提示词目录当中读取制定路径下的提示词内容
-    target = _PROMPT_REPO_DIR / prompt_path
+    target = _REMOTE_PROMPT_DIR / prompt_path
     if not target.is_file():
         logger.warning("远程仓库中未找到提示词文件:%s", target)
         return None
     return target.read_text(encoding="utf-8")
 
 
+def _resolve_remote_path(prompt_type: PromptType, env: EnvironmentInfo) -> str:
+    """按阶段解析远程仓库内的提示词文件相对路径。
+
+    阶段专用路径(``git_intent_relative_path`` / ``git_reply_relative_path``)
+    为空时回退到阶段默认文件名。
+
+    Raises:
+        ValueError: ``prompt_type`` 非 :class:`PromptType` 合法成员。
+    """
+    if prompt_type == PromptType.INTENT:
+        return env.git_intent_relative_path or "intent_system_prompt.md"
+    if prompt_type == PromptType.REPLY:
+        return env.git_reply_relative_path or "reply_system_prompt.md"
+    raise ValueError(f"不支持的提示词类型:{prompt_type!r}")
+
+
 async def build_system_prompt(
+    prompt_type: PromptType,
     env: EnvironmentInfo,
     *,
     custom_prompt: str | None = None,
 ) -> str:
-    """构建主控 LLM 的系统提示词。
+    """构建基础系统提示词(仅负责来源选择,不做运行时拼装)。
 
     优先级:启用远程仓库(``env.is_git_repo`` 且配置了 ``env.git_repo_url``)
     → 自定义提示词 → 默认提示词。任一来源为空或失败,自动降级到下一级。
 
     Args:
+        prompt_type: 提示词阶段,见 :class:`PromptType`,决定默认模板与远程路径分流。
         env: 运行环境信息,用其 ``is_git_repo`` 决定是否启用远程拉取。
         custom_prompt: 调用方提供的自定义提示词,为空则跳过。
-        env.git_repo_url: 远程提示词仓库地址,仅当 ``env.is_git_repo`` 为真时生效。
 
     Returns:
-        返回系统提示词。
+        基础系统提示词文本。运行时拼装请见
+        :func:`prompts.context.build_runtime_system_prompt`。
     """
     prompt: str | None = None
 
@@ -180,7 +245,7 @@ async def build_system_prompt(
     if env.is_git_repo and env.git_repo_url:
         prompt = await _fetch_remote_prompt(
             env.git_repo_url,
-            env.git_relative_path or "system_prompt.md",  # 远程仓库内提示词文件的相对路径
+            _resolve_remote_path(prompt_type, env),  # 按 prompt_type 分流远程仓库内路径
             env.git_branch,  # 指定拉取的分支,为空时使用仓库默认分支
         )
 
@@ -188,8 +253,8 @@ async def build_system_prompt(
     if not prompt and custom_prompt:
         prompt = custom_prompt
 
-    # 3. 兜底:默认提示词
+    # 3. 兜底:默认提示词(按 prompt_type)
     if not prompt:
-        prompt = get_base_system_prompt()
+        prompt = get_base_system_prompt(prompt_type)
 
     return prompt

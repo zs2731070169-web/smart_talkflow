@@ -29,7 +29,7 @@ class OpenAIClient:
         messages: list[dict[str, str]] = []
         if request.system_prompt:
             messages.append({"role": "system", "content": request.system_prompt})
-        for msg in request.message:
+        for msg in request.messages:
             text = "".join(block.text for block in msg.content if block.type == "text")
             messages.append({"role": msg.role, "content": text})
 
@@ -40,9 +40,9 @@ class OpenAIClient:
             "stream": True,
         }
 
-        # workflows 透传为 OpenAI workflow(为空则不传)
+        # 工具 透传为 OpenAI tools(为空则不传)
         if request.tools:
-            kwargs["workflow"] = request.tools
+            kwargs["tools"] = request.tools
 
         # 流式拉取:逐 chunk 吐出文本片段;
         # tool_calls 为增量协议,按 index 聚合 id / name / arguments
@@ -108,7 +108,7 @@ class AnthropicApiClient:
 
         messages = [
             {"role": msg.role, "content": [build_block(block) for block in msg.content]}
-            for msg in request.message
+            for msg in request.messages
             if msg.content  # 跳过空内容消息
         ]
         return request.system_prompt, messages
@@ -124,7 +124,7 @@ class AnthropicApiClient:
         if system_prompt:
             kwargs["system"] = system_prompt
         if request.tools:
-            kwargs["workflow"] = request.tools
+            kwargs["tools"] = request.tools
 
         # 流式拉取:text_stream 逐片段吐出,get_final_message 聚合完整响应(含 tool_use)
         async with self._client.messages.stream(**kwargs) as stream:

@@ -56,20 +56,28 @@ class Settings(BaseSettings):
     # ---- 通用 ----
     tz: str = "Asia/Shanghai"
 
-    # ---- LLM ----
+    # ---- LLM 配置 ----
     llm_provider: str | None = None
 
     llm_api_key: str | None = None
-
-    llm_model: str | None = None
 
     llm_base_url: str | None = None
 
     llm_timeout: int = 60
 
-    llm_temperature: float = 0.3
+    # ---- 意图理解 LLM(调用 1)----
+    intent_llm_name: str | None = None
 
-    max_tokens: int = 4096
+    intent_llm_temperature: float = 0.3
+
+    intent_llm_max_tokens: int = 4096
+
+    # ---- 回复生成 LLM(调用 2;未配 reply_llm_name 则 fallback intent_llm_name)----
+    reply_llm_name: str | None = None
+
+    reply_llm_temperature: float = 0.3
+
+    reply_llm_max_tokens: int = 4096
 
     # ---- 提示词仓库(可选,用于从远程 git 仓库拉取系统提示词)----
     is_git_repo: bool = False
@@ -78,7 +86,10 @@ class Settings(BaseSettings):
 
     git_branch: str | None = None
 
-    git_relative_path: str | None = None
+    # intent / reply 阶段各自的远程提示词路径
+    git_intent_relative_path: str | None = None
+
+    git_reply_relative_path: str | None = None
 
     # ---- 下游业务系统 ----
     # 接入 OA
@@ -118,23 +129,16 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def _required_non_blank(self) -> Settings:
         if not (
-            self.llm_model
+            self.intent_llm_name
             and self.llm_provider
             and self.llm_base_url
             and self.llm_api_key
             and self.llm_timeout
-            and self.llm_temperature
+            and self.intent_llm_temperature
         ):
-            raise ValueError("llm 配置不能为空")
+            raise ValueError("意图理解 llm 配置不能为空")
 
-        if not (
-            self.mysql_host
-            and self.mysql_database
-            and self.mysql_user
-            and self.mysql_password
-            and self.sql_log
-            and self.tz
-        ):
+        if not (self.mysql_host and self.mysql_database and self.mysql_user and self.mysql_password and self.tz):
             raise ValueError("mysql 配置不能为空")
 
         # 启用远程仓库拉取时仓库地址必填;分支与相对路径保持可选

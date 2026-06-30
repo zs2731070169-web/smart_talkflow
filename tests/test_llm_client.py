@@ -33,8 +33,8 @@ class LlmClientTest(unittest.IsolatedAsyncioTestCase):
             timeout=settings.llm_timeout,
         )
         request = ApiMessageRequest(
-            model=settings.llm_model,
-            message=[ConversationMessage(role="user", content=[TextBlock(text="明天杭州的天气是什么")])],
+            model=settings.intent_llm_name,
+            messages=[ConversationMessage(role="user", content=[TextBlock(text="明天杭州的天气是什么")])],
             tools=[
                 {
                     "type": "function",
@@ -71,8 +71,8 @@ class LlmClientTest(unittest.IsolatedAsyncioTestCase):
             timeout=settings.llm_timeout,
         )
         anthropic_request = ApiMessageRequest(
-            model=settings.llm_model,
-            message=[ConversationMessage(role="user", content=[TextBlock(text="明天杭州的天气是什么")])],
+            model=settings.intent_llm_name,
+            messages=[ConversationMessage(role="user", content=[TextBlock(text="明天杭州的天气是什么")])],
             tools=[
                 {
                     "name": "weather_search",

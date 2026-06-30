@@ -74,8 +74,8 @@
 - 🔁 **业务键级幂等 + 状态机**——以 `UNIQUE(process_key, business_key)` 兜底,命中记录按 `running / completed / failed / reject` 分流:已完成的直接短路,失败的按重试计数放行或永久拒绝。
 - 🔐 **两层认证 + 代签**——开发态信任请求头、生产态走 SSO/JWT(JWKS 公钥经 Redis 缓存验签);真实操作人经 HMAC 代签给下游,服务账号只做技术认证,审计与权限始终归属真实用户(代签依赖下游支持,如 yudao 的 `AgentDelegationFilter`;不支持代签的系统审计会降级为服务账号级别)。
 - 🧭 **配置化角色权限(RBAC)**——独立权限层 `WorkflowRoleChecker` 查 `workflow_role` 表(「工作流 → 允许角色」策略),在执行前比对 `operator.roles`(空集=全员可用,非空按角色命中);查询经 Redis 缓存,**策略由运维增删、改完即时生效,无需重启**。`is_allowed` 已从工作流基类下沉到此,工作流本身不掺权限。
-- 🧩 **LLM 抽象层,屏蔽厂商差异**——一套 `SupportsInvokeMessages` 协议统一 OpenAI / Anthropic,Function Calling / Tool Use 归一为 `ToolUseBlock`,切换厂商只改环境变量。
-- 📡 **SSE 流式反馈**——意图解析与工具执行的过程实时以 `text / tool_started / tool_completed` 事件推回前端,长流程不阻塞。
+- 🧩 **LLM 抽象层,屏蔽厂商差异**——一套 `SupportsStreamingMessages` 协议统一 OpenAI / Anthropic,Function Calling / Tool Use 归一为 `ToolUseBlock`,切换厂商只改环境变量。
+- 📡 **SSE 流式反馈**——意图理解与工具执行的过程实时以 `text / tool_started / tool_progress / tool_completed` 事件推回前端,长流程不阻塞。
 - 📝 **提示词三级降级**——远程 git 仓库 > 自定义 > 内置默认,任一来源失败自动降级,支持提示词热更新与版本化。
 - 🔍 **全链路 Trace ID**——每条请求生成唯一 `trace_id`,贯穿日志、数据库记录、对外 HTTP 调用头,出问题可像"查案"一样还原现场。
 - 🧱 **一次调用一条留痕**——适配器把下游真实 HTTP 状态码归一为业务异常,但**不向上抛**,而是结构化为 `AdapterResponse` 落库,保证审计完整性。
@@ -94,7 +94,7 @@ graph TD
         API["/chat 路由<br/>SSE 流式回复"]
         AUTH["认证 get_current_operator<br/>开发态请求头 / 生产态 SSO·JWT·JWKS"]
         RT["Runtime 每请求执行<br/>装配请求级上下文"]
-        AGENT["IntentParser<br/>意图解析 + 缺参反问"]
+        AGENT["Query 对话编排器<br/>意图理解(tools)→ 并发执行 → 回复"]
         ORCH["WorkflowDispatcher<br/>权限 → 校验 → 幂等 → 执行"]
         IDEM["幂等控制器<br/>Status + is_new"]
         ADP["适配层 adapters"]
@@ -147,7 +147,7 @@ graph TD
 | **3** | **工具标准化** | 适配层暴露标准 `GET /tools` + `POST /invoke`,编排层经 `ToolRegistry` 工具注册中心统一发现与调用 | 📋 规划中 |
 | **4** | **长程任务可靠性** | 异步调度 + 事件驱动恢复 + 人工审批节点 + Saga 补偿引擎 + 超时扫描 | 📋 规划中 |
 
-**阶段一当前进度**:基础设施层(DB/HTTP/日志/异常/Redis)、认证层(JWKS/SSO)、编排层(**generator 工作流引擎** `workflow_engine.py`(drive/create/_exec_step/compensate/replay_steps)+ dispatcher + 幂等 `Status(StrEnum)` + is_new)、**配置化 RBAC 权限层**、**`process_step` 步骤留痕闭环 + generator 闭包补偿**、OA 适配器(`step_call` 转 `StepResult` + 代签)、会议室预订流程(`create()` generator)、SSE 流式管线均已落地。**崩溃自动恢复已落地**(`downgrade.py` handle_processes:replay + 补偿,不重跑 + heartbeat watchdog)。**端到端链路已跑通**(`test_dispatcher_e2e.py`:dispatcher → engine → adapter mock → MySQL)。**当前缺口**是意图解析核心 `IntentParser.run()`(LLM 调用仍为骨架)。
+**阶段一当前进度**:基础设施层(DB/HTTP/日志/异常/Redis)、认证层(JWKS/SSO)、编排层(**generator 工作流引擎** `workflow_engine.py`(drive/create/_exec_step/compensate/replay_steps)+ dispatcher + 幂等 `Status(StrEnum)` + is_new)、**配置化 RBAC 权限层**、**`process_step` 步骤留痕闭环 + generator 闭包补偿**、OA 适配器(`step_call` 转 `StepResult` + 代签)、会议室预订流程(`create()` generator)、SSE 流式管线均已落地。**崩溃自动恢复已落地**(`downgrade.py` handle_processes:replay + 补偿,不重跑 + heartbeat watchdog)。**端到端链路已跑通**(`test_dispatcher_e2e.py`:dispatcher → engine → adapter mock → MySQL)。**对话编排链路已落地**(`engine/query.py` `Query.run` 两段式 LLM:意图理解带 function-calling `tools` → 并发执行 workflow → 回复生成,见 `test_verify_query_streaming`)。**当前缺口**为身份补全 `resolver`、邮箱 / CRM / ERP 等适配器。
 
 **各阶段验收标准**(摘要):
 
@@ -183,16 +183,17 @@ smart_talkflow/
 │   ├── main.py                   # ✅ FastAPI 入口:lifespan 装配 runtime + 停机释放 DB/Redis
 │   ├── conf/
 │   │   └── config.py             # ✅ pydantic-settings 单例(启动即校验)
-│   ├── engine/                   # LLM 引擎层(厂商无关抽象)
+│   ├── engine/                   # LLM 引擎层(厂商无关流式抽象)
 │   │   ├── client/
-│   │   │   ├── base_client.py    # ✅ 统一请求/响应模型 + SupportsInvokeMessages 协议
+│   │   │   ├── base_client.py    # ✅ SupportsStreamingMessages 协议 + 统一入参 ApiMessageRequest
 │   │   │   ├── llm_client.py     # ✅ OpenAI / Anthropic 客户端(屏蔽 SDK 差异)
 │   │   │   └── messages.py       # ✅ 会话消息模型(tool_calls/tool_use 归一为 ToolUseBlock)
-│   │   ├── prompts/
-│   │   │   ├── system_prompt.py  # ✅ 主控提示词(远程/自定义/默认三级降级)
-│   │   │   └── envirement.py     # ✅ 运行环境信息
-│   │   ├── stream_event.py       # ✅ 编排层流式事件(AssistantTextDelta / ToolExecution*)
-│   │   └── parser.py             # 🚧 IntentParser 意图解析(当前骨架,主线缺口)
+│   │   ├── query.py              # ✅ Query 对话编排器(意图理解带 tools → 并发执行 workflow → 回复生成)
+│   │   └── stream_event.py       # ✅ 对外流式事件(AssistantTextDelta / ToolExecution* / ToolProgress)
+│   ├── prompts/                  # 提示词层(来源层 + 运行时入口)
+│   │   ├── system_prompt.py      # ✅ 来源层(远程/本地 custom/默认三级降级 + PromptType 分流)
+│   │   ├── context.py            # ✅ 运行时入口(build_runtime_system_prompt)
+│   │   └── environment.py        # ✅ 运行环境信息(settings → EnvironmentInfo)
 │   ├── security/                 # 认证层
 │   │   └── jwks_client.py        # ✅ JWKS 公钥解析 + Redis 缓存(JWT RS256 验签)
 │   ├── api/                      # FastAPI 路由层
@@ -276,7 +277,7 @@ LLM 可能编造不存在的部门名或会议室号。所有 LLM 输出都经 P
 
 ### 5. 统一的 LLM 抽象层
 
-通过 `SupportsInvokeMessages` Protocol 定义统一的客户端接口,`OpenAIClient` 与 `AnthropicApiClient` 各自实现。无论底层是 OpenAI 的 `tool_calls` 还是 Anthropic 的 `tool_use` 块,对外都归一为 `ToolUseBlock`。切换模型或厂商只需改环境变量。
+通过 `SupportsStreamingMessages` Protocol 定义统一的客户端接口,`OpenAIClient` 与 `AnthropicApiClient` 各自实现。无论底层是 OpenAI 的 `tool_calls` 还是 Anthropic 的 `tool_use` 块,对外都归一为 `ToolUseBlock`。切换模型或厂商只需改环境变量。
 
 ### 6. 两层认证 + 操作人代签
 
@@ -288,7 +289,7 @@ LLM 可能编造不存在的部门名或会议室号。所有 LLM 输出都经 P
 
 ### 7. 启动装配一次,每请求轻量执行
 
-进程级组件(`WorkflowRegistry` / `WorkflowDispatcher` / `IntentParser`)在应用 `lifespan` 启动时**装配一次**,存入 `app.state`;每个请求只做轻量执行——构建请求级上下文、跑意图解析、产出 SSE 事件流。SSE 序列化归 runtime,路由层不做请求内装配。
+进程级组件(`WorkflowRegistry` / `WorkflowDispatcher` / `Query`)在应用 `lifespan` 启动时**装配一次**,存入 `app.state`;每个请求只做轻量执行——构建请求级上下文、跑对话编排(`Query.run`)、产出 SSE 事件流。SSE 序列化归 runtime,路由层不做请求内装配。
 
 ### 8. 一次调用一条结构化留痕
 
@@ -477,7 +478,7 @@ docker compose up -d     # 重新初始化,重新执行建表脚本
 - 💡 讨论架构与路线图 → 阅读 [`SSD/`](./SSD/) 下的设计文档后发表意见
 - 🔧 提交代码 → Fork → 分支开发 → PR(请确保不破坏现有基础设施层自测)
 
-**特别欢迎的方向**:`IntentParser` 意图解析器的落地实现、身份补全 `resolver`、各传统系统适配器(邮箱 / CRM / ERP)的实现,以及阶段二的流程编排深化。
+**特别欢迎的方向**:身份补全 `resolver`、各传统系统适配器(邮箱 / CRM / ERP)的实现,以及阶段二的流程编排深化。
 
 ## 协议
 

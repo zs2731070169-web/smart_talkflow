@@ -61,7 +61,9 @@ async def handle_processes(registry: WorkflowRegistry):
         if fail_step is not None:
             fail_step_result = StepResult(name="downgrade", error="心跳超时中断")
             process_ctx = ProcessContext(process_id=process.id)
-            await compensate(generator, step_results, fail_step_result, process_ctx, on_step=None)  # 执行补偿流程
+            # 执行补偿流程(compensate 是 generator,消费 yield 靠副作用 + 自有 transition_status)
+            async for _ in compensate(generator, step_results, fail_step_result, process_ctx):
+                pass
             # 失败:标 failed
             await transition_status(
                 process.id,

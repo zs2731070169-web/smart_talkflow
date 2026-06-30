@@ -36,4 +36,16 @@ class ToolExecutionCompleted:
     metadata: dict[str, Any] | None = None
 
 
-StreamEvent = AssistantTextDelta | ToolExecutionStarted | ToolExecutionCompleted | AssistantTurnComplete
+@dataclass(frozen=True)
+class ToolProgress:
+    """工具(工作流)单步执行进度(步级流式)。"""
+
+    tool_name: str
+    step_name: str
+    is_error: bool
+    error: str | None = None
+    step_id: int | None = None
+    is_compensation: bool = False
+
+
+StreamEvent = AssistantTextDelta | ToolExecutionStarted | ToolExecutionCompleted | ToolProgress | AssistantTurnComplete

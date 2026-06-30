@@ -36,11 +36,12 @@ class BaseWorkflow(ABC):
     def business_key(self, arguments: BaseModel) -> str | None:
         """从入参提取业务唯一键(供流程级幂等校验使用)。"""
 
-    async def execute(self, arguments: BaseModel, process_id: int | None) -> WorkflowResult:
-        """通用驱动:委托 workflow_engine.drive 驱动"""
+    async def execute(self, arguments: BaseModel, process_id: int | None):
+        """通用驱动:委托 workflow_engine.drive(透传 StepResult | WorkflowResult)。"""
         from orchestrator.workflow_engine import ProcessContext, drive
 
-        return await drive(self, arguments, ProcessContext(process_id=process_id))
+        async for result in drive(self, arguments, ProcessContext(process_id=process_id)):
+            yield result
 
     def to_api_schema(self) -> dict[str, Any]:
         """将工作流定义结构序列化为API格式."""

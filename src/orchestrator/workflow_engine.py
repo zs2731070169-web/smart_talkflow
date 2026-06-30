@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import inspect
 import logging
-from collections.abc import Awaitable, Callable, Generator
+from collections.abc import AsyncGenerator, Awaitable, Callable, Generator
 from dataclasses import asdict, dataclass, field, replace
 from time import perf_counter
 from typing import Any
@@ -48,6 +48,7 @@ class StepResult:
     error: str | None = None
     name: str = ""
     step_id: int | None = None
+    is_compensation: bool = False  # 补偿步标记(正常步 False / 补偿步 True)
 
 
 @dataclass
@@ -148,48 +149,40 @@ async def _exec_step(step: Step, step_no: int, process_ctx: ProcessContext) -> S
     return result
 
 
-async def drive(
-    workflow, arguments, process_ctx: ProcessContext, *, on_step: Callable[[StepResult], Awaitable[None]] | None = None
-) -> WorkflowResult:
-    """驱动 workflow.create generator:send 推进, 失败 throw Compensate 补偿。"""
-    # 创建定义好的工作流编排, 返回生成器
+async def drive(workflow, arguments, process_ctx: ProcessContext) -> AsyncGenerator[StepResult | WorkflowResult, None]:
+    """驱动 workflow.create generator:send 推进, 失败转 compensate;yield 步结果 + 末尾整体结果。"""
     gen: Generator = workflow.create(arguments)
-
     step_results: list[StepResult] = []
     send_value: Any = None  # 首次 send(None) 启动
 
     try:
         while True:
             try:
-                # send: 赋值当前yield表达式左边变量, 并且恢复下一个step执行
                 step = gen.send(send_value)
             except StopIteration as stop:
-                return WorkflowResult(
+                yield WorkflowResult(
                     output=stop.value or "执行完成",
                     metadata={"steps": [asdict(step_result) for step_result in step_results]},
                 )
+                return
             if not isinstance(step, Step):
                 raise TypeError(f"create 必须 yield Step,得到 {type(step)}")
 
             result = await _exec_step(step, len(step_results) + 1, process_ctx)
-
-            # 添加步骤结果
             step_results.append(result)
+            yield result  # 正常步(is_compensation=False)
 
-            # 输出步骤钩子
-            if on_step:
-                await on_step(result)
-
-            # 执行结果赋值给 send_value, send给当前yield表达式
             send_value = result.data
 
             if not result.ok:
                 # 失败:throw Compensate 触发补偿分支, 驱动补偿步直到 StopIteration
                 logger.info("drive:步 %d 失败(%s),转补偿", len(step_results), result.error)
-                return await compensate(gen, step_results, result, process_ctx, on_step)
+                async for compensate_step in compensate(gen, step_results, result, process_ctx):
+                    yield compensate_step
+                return
     except Exception as exc:
         logger.exception("drive 异常:workflow=%s", getattr(workflow, "name", "?"))
-        return WorkflowResult(
+        yield WorkflowResult(
             output=f"流程异常: {exc!r}",
             is_error=True,
             metadata={"steps": [asdict(r) for r in step_results]},
@@ -197,48 +190,48 @@ async def drive(
 
 
 async def compensate(
-    gen: Generator,
-    step_results: list[StepResult],
-    fail_step_result: StepResult,
-    process_ctx: ProcessContext,
-    on_step: Callable[[StepResult], Awaitable[None]] | None,
-) -> WorkflowResult:
-    """gen.throw(Compensate) 触发 create 补偿分支,驱动补偿步直到 StopIteration。"""
+        gen: Generator,
+        step_results: list[StepResult],
+        fail_step_result: StepResult,
+        process_ctx: ProcessContext,
+) -> AsyncGenerator[StepResult | WorkflowResult, None]:
+    """gen.throw(Compensate) 触发 create 补偿分支,驱动补偿步直到 StopIteration;yield 补偿步 + 末尾整体结果。"""
     logger.info("补偿:throw Compensate(失败步=%s)", fail_step_result.name)
 
     try:
         # 失败 yield 处抛 → create 进 except → 返回首个补偿步
         step = gen.throw(Compensate(fail_step_result.error or "执行失败"))
-    except StopIteration as stop:  # except 内无 yield,直接 return
-        return WorkflowResult(
+
+        step_no = len(step_results) + 1
+
+        # 驱动补偿步(终态/逆序都由 create 的 except 体决定)
+        while True:
+            result = await _exec_step(step, step_no, process_ctx)
+            logger.info("补偿步执行:%s ok=%s", result.name, result.ok)
+            step_results.append(result)
+            yield replace(result, is_compensation=True)  # 补偿步
+            step_no += 1
+            try:
+                step = gen.send(None)  # 补偿步产出不赋值左边变量(create 闭包已有所需变量)
+            except StopIteration as stop:
+                yield WorkflowResult(
+                    output=stop.value or fail_step_result.error or "执行失败,已补偿",
+                    is_error=True,
+                    metadata={"steps": [asdict(step_result) for step_result in step_results], "compensated": True},
+                )
+                break
+    except StopIteration as stop:  # except 内无 yield,直接结束
+        yield WorkflowResult(
             output=stop.value or fail_step_result.error or "执行失败",
             is_error=True,
             metadata={"steps": [asdict(step_result) for step_result in step_results], "compensated": True},
         )
     except Compensate:  # create 没 except Compensate(无补偿)→ 直接失败
-        return WorkflowResult(
+        yield WorkflowResult(
             output=(fail_step_result and fail_step_result.error) or "执行失败",
             is_error=True,
             metadata={"steps": [asdict(result_step) for result_step in step_results]},
         )
-
-    step_no = len(step_results) + 1
-
-    while True:  # 驱动补偿步(终态/逆序都由 create 的 except 体决定)
-        result = await _exec_step(step, step_no, process_ctx)
-        logger.info("补偿步执行:%s ok=%s", result.name, result.ok)
-        step_results.append(result)
-        if on_step:
-            await on_step(result)
-        step_no += 1
-        try:
-            step = gen.send(None)  # 补偿步产出不赋值左边变量(create 闭包已有所需变量)
-        except StopIteration as stop:
-            return WorkflowResult(
-                output=stop.value or fail_step_result.error or "执行失败,已补偿",
-                is_error=True,
-                metadata={"steps": [asdict(step_result) for step_result in step_results], "compensated": True},
-            )
 
 
 async def replay_steps(workflow, arguments, process_id: int) -> tuple[list[StepResult], Step | None, Generator]:

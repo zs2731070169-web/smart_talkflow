@@ -11,6 +11,7 @@ mock 下游 client 与步骤留痕(避免真实 yudao / DB),驱动 BaseWorkflow.
 import unittest
 from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
+from orchestrator.base import WorkflowResult
 from orchestrator.workflow.meeting_room import (
     MeetingRoomBookingInput,
     MeetingRoomBookingWorkflow,
@@ -60,7 +61,11 @@ class MeetingRoomWorkflowTest(unittest.IsolatedAsyncioTestCase):
             patch("orchestrator.workflow.meeting_room.room_booking_adapter", client_mock),
         ):
             wf = MeetingRoomBookingWorkflow()
-            return await wf.execute(self._args(), process_id=100)
+            workflow_result = None
+            async for result in wf.execute(self._args(), process_id=100):
+                if isinstance(result, WorkflowResult):
+                    workflow_result = result
+            return workflow_result
 
     async def test_all_steps_success(self):
         """全成功:三步顺序执行,bookingId 经 ref 流转,无补偿(cancel 不调)。"""

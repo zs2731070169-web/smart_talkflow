@@ -125,23 +125,6 @@ async def finish_step(
         logger.exception("更新 ProcessStep 失败(step_id=%s)", step_id)
 
 
-async def update_compensation(step_id: int, status: CompensationStatus) -> None:
-    """更新步骤的补偿状态(:attr:`CompensationStatus.DONE` / :attr:`CompensationStatus.FAILED`)。
-
-    Saga 逆序补偿时,对每个已成功步调用:补偿成功标 ``done``,补偿失败标 ``failed``
-    交人工(不吞错——补偿失败意味着 yudao 侧可能残留,需可见)。
-    """
-    try:
-        async with db_session() as session:
-            row = await session.get(ProcessStep, step_id)
-            if row is None:
-                return
-            row.compensation_status = status.value
-            await session.flush()
-    except SQLAlchemyError:
-        logger.exception("标记 ProcessStep 补偿状态失败(step_id=%s status=%s)", step_id, status)
-
-
 async def list_completed_steps(process_id: int) -> list[tuple[int, str, Any | None]]:
     """查指定流程下所有 completed 步,返回 [(step_no, step_key, result_data), ...](按 step_no 升序)。
 

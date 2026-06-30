@@ -61,17 +61,21 @@ class RequestContext:
     """请求级只读不变量上下文。
 
     api 层每请求构建一个实例,承载该请求的用户身份与 LLM 配置,请求结束即弃。
-    LLM 专用字段(model / api_client / system_prompt / messages)在非 LLM 路径(如降级)可不填。
+    LLM 专用字段(intent_model / api_client / system_prompt / messages)在非 LLM 路径(如降级)可不填。
     """
 
     # 操作人信息
     operator: OperatorContext
-    # 使用的 model 配置
-    model: ModelContext | None = None
+    # 意图理解 model 配置(意图理解)
+    intent_model: ModelContext | None = None
+    # 回复生成 model 配置
+    reply_model: ModelContext | None = None
     # llm客户端
     api_client: SupportsStreamingMessages | None = None
-    # 标准系统提示词
-    system_prompt: str | None = None
+    # 意图解析标准系统提示词
+    intent_system_prompt: str | None = None
+    # 回复生成标准系统提示词
+    reply_system_prompt: str | None = None
     # 用户查询提示词
     messages: list[ConversationMessage] | None = None
     # 工作流注册器

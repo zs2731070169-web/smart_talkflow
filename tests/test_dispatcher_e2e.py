@@ -13,6 +13,7 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from infra.database import init_engine
+from orchestrator.base import WorkflowResult
 from orchestrator.dispatcher import WorkflowDispatcher
 from orchestrator.workflow.meeting_room import MeetingRoomBookingInput, MeetingRoomBookingWorkflow
 from runtime.context import OperatorContext, RequestContext, set_request_context
@@ -62,6 +63,14 @@ class DispatcherE2ETest(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self):
         set_request_context(None)
 
+    async def _consume(self, execute_gen):
+        """消费 execute generator,返回末尾 WorkflowResult。"""
+        workflow_result = None
+        async for result in execute_gen:
+            if isinstance(result, WorkflowResult):
+                workflow_result = result
+        return workflow_result
+
     async def test_e2e_full_chain(self):
         """端到端 3 场景:全成功 / approve 失败补偿 / 幂等短路(同一 loop)。"""
         base = int(time.time()) % 100000
@@ -81,7 +90,7 @@ class DispatcherE2ETest(unittest.IsolatedAsyncioTestCase):
             patch("infra.http.request", side_effect=mock_http_1),
             patch("permission.permission.workflow_role_checker.is_allowed", return_value=True),
         ):
-            results["success"] = await self._dispatcher.execute(workflow, _inputs(base))
+            results["success"] = await self._consume(self._dispatcher.execute(workflow, _inputs(base)))
 
         r = results["success"]
         self.assertFalse(r.is_error, f"[全成功] 应成功: {r.output}")
@@ -105,7 +114,7 @@ class DispatcherE2ETest(unittest.IsolatedAsyncioTestCase):
             patch("infra.http.request", side_effect=mock_http_2),
             patch("permission.permission.workflow_role_checker.is_allowed", return_value=True),
         ):
-            results["compensate"] = await self._dispatcher.execute(workflow, _inputs(base + 1))
+            results["compensate"] = await self._consume(self._dispatcher.execute(workflow, _inputs(base + 1)))
 
         r = results["compensate"]
         self.assertTrue(r.is_error, "[补偿] approve 失败应 is_error=True")
@@ -124,9 +133,9 @@ class DispatcherE2ETest(unittest.IsolatedAsyncioTestCase):
             patch("infra.http.request", side_effect=mock_http_3),
             patch("permission.permission.workflow_role_checker.is_allowed", return_value=True),
         ):
-            results["first"] = await self._dispatcher.execute(workflow, _inputs(base + 2))
-            results["second"] = await self._dispatcher.execute(
-                workflow, _inputs(base + 2)
+            results["first"] = await self._consume(self._dispatcher.execute(workflow, _inputs(base + 2)))
+            results["second"] = await self._consume(
+                self._dispatcher.execute(workflow, _inputs(base + 2))
             )  # 同 business_key → 命中 completed
 
         self.assertFalse(results["first"].is_error, "[幂等] 第一次应成功")

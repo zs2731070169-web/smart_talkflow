@@ -1,7 +1,7 @@
 """工作流执行编排:认证 → 权限 → 幂等 → drive → finalize。
 
 :class:`WorkflowDispatcher` 是工作流执行的统一入口,串联认证/权限/幂等/引擎驱动/终态收尾。
-路由(``get_workflow``)与参数校验(``model_validate``)由 IntentParser 前移处理,
+路由(``get_workflow``)与参数校验(``model_validate``)由 Query 前移处理,
 本类只接收已校验输入,串联各环节、自身只编排。
 """
 
@@ -25,38 +25,43 @@ class WorkflowDispatcher:
     进程级单例(由 ``build_runtime`` 装配一次),无状态(每请求从 ContextVar 取 operator)。
     """
 
-    async def execute(self, workflow: BaseWorkflow, inputs: BaseModel) -> WorkflowResult:
-        """工作流执行入口。
+    async def execute(self, workflow: BaseWorkflow, inputs: BaseModel):
+        """工作流执行入口(generator):短路 yield WorkflowResult;正常透传 StepResult + 末尾 WorkflowResult + _finalize。
 
-        :param workflow: 已路由的 workflow(IntentParser._route)
-        :param inputs: 已校验的入参(IntentParser._validate)
+        :param workflow: 已路由的 workflow
+        :param inputs: 已校验的入参
         """
         # 1. 认证:operator 由 api/deps 注入 ContextVar
         operator = get_operator()
         if operator is None:
             logger.warning("未认证请求,拒绝执行工作流: %s", workflow.name)
-            return WorkflowResult(output="未认证:缺少合法执行人", is_error=True)
+            yield WorkflowResult(output="未认证:缺少合法执行人", is_error=True)
+            return
 
         # 2. 权限:operator 角色不在 workflow_role 白名单则拒执行
         if not await workflow_role_checker.is_allowed(workflow.name, operator):
             logger.warning("用户 %s 无权触发工作流 %s", operator.user_id, workflow.name)
-            return WorkflowResult(output="您没有该操作的权限", is_error=True)
+            yield WorkflowResult(output="您没有该操作的权限", is_error=True)
+            return
 
-        # 3. 幂等校验(命中终态时直接短路返回)
+        # 3. 幂等校验(命中终态时直接短路)
         checker, checked, workflow_result = await self._check_idempotency(workflow, inputs, operator)
         if workflow_result is not None:
-            return workflow_result
+            yield workflow_result
+            return
 
         # 4. 取 process_id(任务追踪)
         process_id = checked.process.id if (checked is not None and checked.process is not None) else None
 
-        # 5. 执行(execute)
-        result = await workflow.execute(inputs, process_id)
+        # 5. 执行:透传 StepResult | WorkflowResult,捕获末尾 WorkflowResult 做 finalize
+        final_result = None
+        async for result in workflow.execute(inputs, process_id):
+            yield result
+            if isinstance(result, WorkflowResult):
+                final_result = result
 
         # 6. 状态更新:按执行结果判定 completed / failed
-        await self._finalize(checker, checked, result)
-
-        return result
+        await self._finalize(checker, checked, final_result)
 
     async def _check_idempotency(
         self,
